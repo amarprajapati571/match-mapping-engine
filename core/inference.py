@@ -98,7 +98,7 @@ class InferenceEngine:
 
         if device == "cuda":
             vram_alloc = torch.cuda.memory_allocated() / (1024 ** 2)
-            vram_total = torch.cuda.get_device_properties(0).total_mem / (1024 ** 2)
+            vram_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
             logger.info(
                 f"GPU memory after model load: {vram_alloc:.0f} MB / {vram_total:.0f} MB"
             )

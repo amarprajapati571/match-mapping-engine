@@ -815,7 +815,7 @@ def main():
     if device == "cuda" and torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         props = torch.cuda.get_device_properties(0)
-        vram_gb = props.total_mem / (1024 ** 3)
+        vram_gb = props.total_memory / (1024 ** 3)
         print(f"  GPU:              {gpu_name} ({vram_gb:.1f} GB VRAM)")
         print(f"  CUDA Version:     {torch.version.cuda}")
         print(f"  FP16 Training:    ON")
