@@ -428,6 +428,7 @@ class SBERTTrainer:
                 ]
                 eval_dataset = self._examples_to_dataset(val_examples)
 
+            has_eval = eval_dataset is not None
             training_args = SentenceTransformerTrainingArguments(
                 output_dir=output_path,
                 num_train_epochs=epochs,
@@ -438,11 +439,10 @@ class SBERTTrainer:
                 fp16=use_amp and device == "cuda",
                 dataloader_num_workers=num_workers,
                 dataloader_pin_memory=torch.cuda.is_available(),
-                eval_strategy="steps" if eval_dataset is not None else "no",
-                eval_steps=max(1, len(train_examples) // (batch_size * 4)) if eval_dataset else None,
+                eval_strategy="epoch" if has_eval else "no",
                 save_strategy="epoch",
                 logging_steps=50,
-                load_best_model_at_end=eval_dataset is not None,
+                load_best_model_at_end=has_eval,
             )
 
             trainer = SentenceTransformerTrainer(
@@ -456,7 +456,7 @@ class SBERTTrainer:
             self.model.save(output_path)
             logger.info(f"SBERT saved to: {output_path} (v3 Trainer API)")
 
-        except (ImportError, TypeError) as e:
+        except (ImportError, TypeError, ValueError) as e:
             logger.info(f"Falling back to fit() API: {e}")
 
             train_dataloader = DataLoader(
