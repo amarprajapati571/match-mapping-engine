@@ -404,7 +404,7 @@ class SBERTTrainer:
         use_amp = CONFIG.training.use_amp
         device = CONFIG.model.device
         logger.info(
-            f"Training SBERT on {device}: {len(train_examples)} examples, "
+            f"Training SBERT on {device}: {len(train_examples)} examples,"
             f"{epochs} epochs, batch={batch_size}, lr={lr}, amp={use_amp}, "
             f"loss=CosineSimilarityLoss, workers={num_workers}"
         )
