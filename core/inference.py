@@ -111,6 +111,25 @@ class InferenceEngine:
             self.index_b365_pool(self._b365_records)
 
     # ══════════════════════════════════════════
+    # Encoding Helpers
+    # ══════════════════════════════════════════
+
+    def _safe_encode(self, texts, batch_size=64, show_progress_bar=False, use_fp16=False):
+        """Encode texts with optional fp16 precision, falling back if unsupported."""
+        kwargs = dict(
+            batch_size=batch_size,
+            show_progress_bar=show_progress_bar,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+        if use_fp16:
+            try:
+                return self.sbert.encode(texts, precision="float16", **kwargs)
+            except (ValueError, TypeError):
+                logger.info("precision parameter not supported, encoding without fp16")
+        return self.sbert.encode(texts, **kwargs)
+
+    # ══════════════════════════════════════════
     # Index Management
     # ══════════════════════════════════════════
 
@@ -127,13 +146,11 @@ class InferenceEngine:
             f"Encoding {len(b365_matches)} B365 matches "
             f"(batch={CONFIG.model.encode_batch_size}, fp16={use_fp16})..."
         )
-        embeddings = self.sbert.encode(
+        embeddings = self._safe_encode(
             self._b365_texts,
             batch_size=CONFIG.model.encode_batch_size,
             show_progress_bar=True,
-            normalize_embeddings=True,
-            precision="float16" if use_fp16 else "float32",
-            convert_to_numpy=True,
+            use_fp16=use_fp16,
         )
         self._b365_index_np = np.asarray(embeddings, dtype=np.float32)
 
@@ -359,13 +376,11 @@ class InferenceEngine:
         use_fp16 = CONFIG.model.use_fp16 and CONFIG.model.device == "cuda"
         logger.info(f"Batch encoding {len(all_texts)} OP texts (fp16={use_fp16})...")
         all_embeddings = np.asarray(
-            self.sbert.encode(
+            self._safe_encode(
                 all_texts,
                 batch_size=CONFIG.model.encode_batch_size,
-                normalize_embeddings=True,
                 show_progress_bar=len(all_texts) > 100,
-                precision="float16" if use_fp16 else "float32",
-                convert_to_numpy=True,
+                use_fp16=use_fp16,
             ),
             dtype=np.float32,
         )
