@@ -582,11 +582,10 @@ class CrossEncoderTrainer:
             trainer.train()
             self.model.save_pretrained(output_path)
 
-        except ImportError:
-            num_workers = CONFIG.training.dataloader_workers
+        except (ImportError, Exception) as e:
+            logger.info(f"CrossEncoder v3 Trainer unavailable, using fit(): {e}")
             train_dataloader = DataLoader(
                 train_examples, shuffle=True, batch_size=batch_size,
-                num_workers=num_workers, pin_memory=device == "cuda",
             )
             evaluator = None
             if val_examples:
