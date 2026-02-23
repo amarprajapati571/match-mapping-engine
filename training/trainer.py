@@ -344,6 +344,16 @@ class SBERTTrainer:
         self.base_model = base_model or CONFIG.model.sbert_model
         self.model = SentenceTransformer(self.base_model)
 
+    @staticmethod
+    def _examples_to_dataset(examples: List[InputExample]):
+        """Convert InputExample list to HuggingFace Dataset for v3 compatibility."""
+        from datasets import Dataset as HFDataset
+        return HFDataset.from_dict({
+            "sentence1": [ex.texts[0] for ex in examples],
+            "sentence2": [ex.texts[1] for ex in examples],
+            "label": [float(ex.label) for ex in examples],
+        })
+
     def train(
         self,
         train_examples: List[InputExample],
@@ -356,6 +366,7 @@ class SBERTTrainer:
     ) -> str:
         """
         Train SBERT with CosineSimilarityLoss (works with both positive and negative pairs).
+        Uses SentenceTransformerTrainer (v3 API) with fallback to fit() for v2.
         Returns path to saved model.
         """
         epochs = epochs or CONFIG.training.sbert_epochs
@@ -382,11 +393,11 @@ class SBERTTrainer:
                 "Model will still train but discrimination may be poor."
             )
 
+        use_amp = CONFIG.training.use_amp
+        device = CONFIG.model.device
+        grad_accum = CONFIG.training.gradient_accumulation_steps
         num_workers = CONFIG.training.dataloader_workers
-        train_dataloader = DataLoader(
-            train_examples, shuffle=True, batch_size=batch_size,
-            num_workers=num_workers, pin_memory=torch.cuda.is_available(),
-        )
+
         train_loss = losses.CosineSimilarityLoss(self.model)
 
         evaluator = None
@@ -398,30 +409,75 @@ class SBERTTrainer:
                 sentences1, sentences2, scores,
             )
 
-        total_steps = len(train_dataloader) * epochs
-        warmup_steps = int(total_steps * warmup_ratio)
-
-        use_amp = CONFIG.training.use_amp
-        device = CONFIG.model.device
         logger.info(
-            f"Training SBERT on {device}: {len(train_examples)} examples,"
-            f"{epochs} epochs, batch={batch_size}, lr={lr}, amp={use_amp}, "
-            f"loss=CosineSimilarityLoss, workers={num_workers}"
+            f"Training SBERT on {device}: {len(train_examples)} examples, "
+            f"{epochs} epochs, batch={batch_size}, grad_accum={grad_accum}, "
+            f"lr={lr}, amp={use_amp}, loss=CosineSimilarityLoss, workers={num_workers}"
         )
 
-        self.model.fit(
-            train_objectives=[(train_dataloader, train_loss)],
-            epochs=epochs,
-            warmup_steps=warmup_steps,
-            optimizer_params={"lr": lr},
-            output_path=output_path,
-            evaluator=evaluator,
-            evaluation_steps=max(1, len(train_dataloader) // 4),
-            save_best_model=True if evaluator else False,
-            use_amp=use_amp,
-        )
+        try:
+            from sentence_transformers import SentenceTransformerTrainer
+            from sentence_transformers.training_args import SentenceTransformerTrainingArguments
 
-        logger.info(f"SBERT saved to: {output_path}")
+            train_dataset = self._examples_to_dataset(train_examples)
+            eval_dataset = None
+            if val_pairs:
+                val_examples = [
+                    InputExample(texts=[p.anchor_text, p.candidate_text], label=p.label)
+                    for p in val_pairs
+                ]
+                eval_dataset = self._examples_to_dataset(val_examples)
+
+            training_args = SentenceTransformerTrainingArguments(
+                output_dir=output_path,
+                num_train_epochs=epochs,
+                per_device_train_batch_size=batch_size,
+                gradient_accumulation_steps=grad_accum,
+                learning_rate=lr,
+                warmup_ratio=warmup_ratio,
+                fp16=use_amp and device == "cuda",
+                dataloader_num_workers=num_workers,
+                dataloader_pin_memory=torch.cuda.is_available(),
+                eval_strategy="steps" if eval_dataset is not None else "no",
+                eval_steps=max(1, len(train_examples) // (batch_size * 4)) if eval_dataset else None,
+                save_strategy="epoch",
+                logging_steps=50,
+                load_best_model_at_end=eval_dataset is not None,
+            )
+
+            trainer = SentenceTransformerTrainer(
+                model=self.model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                loss=train_loss,
+            )
+            trainer.train()
+            self.model.save(output_path)
+            logger.info(f"SBERT saved to: {output_path} (v3 Trainer API)")
+
+        except (ImportError, TypeError) as e:
+            logger.info(f"Falling back to fit() API: {e}")
+
+            train_dataloader = DataLoader(
+                train_examples, shuffle=True, batch_size=batch_size,
+            )
+            total_steps = len(train_dataloader) * epochs
+            warmup_steps = int(total_steps * warmup_ratio)
+
+            self.model.fit(
+                train_objectives=[(train_dataloader, train_loss)],
+                epochs=epochs,
+                warmup_steps=warmup_steps,
+                optimizer_params={"lr": lr},
+                output_path=output_path,
+                evaluator=evaluator,
+                evaluation_steps=max(1, len(train_dataloader) // 4),
+                save_best_model=True if evaluator else False,
+                use_amp=use_amp,
+            )
+            logger.info(f"SBERT saved to: {output_path} (fit() API)")
+
         return output_path
 
 

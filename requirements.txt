@@ -1,11 +1,12 @@
 # AI Match Mapping Engine — Dependencies
 # All free/open-source models
+# IMPORTANT: Versions are pinned to avoid breaking API changes.
 
 # ── Core ML ──
-torch>=2.0.0
-sentence-transformers>=2.7.0
-transformers>=4.40.0
-accelerate>=1.1.0
+torch>=2.0.0,<2.7.0
+sentence-transformers>=2.7.0,<4.0.0
+transformers>=4.40.0,<5.0.0
+accelerate>=1.1.0,<2.0.0
 
 # ── Vector Search ──
 faiss-cpu>=1.7.0
@@ -16,9 +17,9 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.7.0
 
 # ── Data ──
-numpy>=1.26.0
+numpy>=1.26.0,<2.0.0
 pandas>=2.2.0
-datasets>=2.20.0
+datasets>=2.20.0,<3.0.0
 
 # ── Database (optional, for production) ──
 pymongo>=4.7.0
