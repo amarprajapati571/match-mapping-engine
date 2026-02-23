@@ -143,6 +143,7 @@ PROVIDER_REGISTRY = {
         "suffix": "/get-odds-portal-matches-with-odds",
         "paginated": True,
         "data_key": "rows",
+        "separate_bet365": True,
     },
     "FLASHSCORE": {
         "suffix": "/get-flashscore-to-bet365-unmapped-matches",
@@ -214,6 +215,7 @@ class APIEndpoints:
             "paginated": info.get("paginated", True),
             "data_key": info.get("data_key", "rows"),
             "bet365_key": info.get("bet365_key"),
+            "separate_bet365": info.get("separate_bet365", False),
         }
 
     def get_active_providers(self) -> list:

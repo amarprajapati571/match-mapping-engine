@@ -7,10 +7,10 @@ Cycle (repeats every SCHEDULER_INTERVAL_MINUTES, default 45):
     Fetch CSE feedback → convert to training pairs → train models → reload
 
   Phase 2  FETCH DATA
-    Fetch Bet365 + OddsPortal matches concurrently from external APIs → save
+    Fetch all provider matches concurrently — each API returns provider + Bet365 data
 
   Phase 3  INFERENCE
-    Index B365 pool → batch inference on OP matches → save results → optionally push to API
+    Per-provider: index that provider's Bet365 pool → batch inference → save → optionally push
 
 All timings are configurable via environment variables (see .env.example).
 
@@ -95,9 +95,16 @@ def _build_session() -> requests.Session:
     return session
 
 
-def fetch_all_pages(endpoint: str, label: str) -> List[Dict[str, Any]]:
+def fetch_all_pages(
+    endpoint: str, label: str, data_key: str = "rows", bet365_key: str = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Fetch all pages from a paginated API. Also extracts bundled Bet365 from first page.
+
+    Returns dict: {"matches": [...], "bet365": [...]}
+    """
     session = _build_session()
     all_rows: list = []
+    b365_rows: list = []
     page = 1
     consecutive_failures = 0
 
@@ -120,9 +127,14 @@ def fetch_all_pages(endpoint: str, label: str) -> List[Dict[str, Any]]:
             break
 
         data = body["data"]
-        rows = data.get("rows", [])
+        rows = data.get(data_key, [])
         total_pages = data.get("totalPages", 1)
         all_rows.extend(rows)
+
+        if page == 1 and bet365_key and isinstance(data, dict):
+            b365_rows = data.get(bet365_key, [])
+            if b365_rows:
+                logger.info(f"  [{label}] found {len(b365_rows)} bundled Bet365 matches in response")
 
         logger.info(f"  [{label}] page {page}/{total_pages} — {len(all_rows)} rows so far")
 
@@ -132,7 +144,7 @@ def fetch_all_pages(endpoint: str, label: str) -> List[Dict[str, Any]]:
         time.sleep(0.3)
 
     logger.info(f"  [{label}] fetched {len(all_rows)} matches total")
-    return all_rows
+    return {"matches": all_rows, "bet365": b365_rows}
 
 
 def fetch_single_response(
@@ -395,33 +407,36 @@ def _submit_provider_fetch(executor, provider_info: dict):
     """Submit the right fetch function based on provider config."""
     name = provider_info["name"]
     endpoint = provider_info["endpoint"]
+    data_key = provider_info.get("data_key", "rows")
+    bet365_key = provider_info.get("bet365_key")
     if provider_info.get("paginated", True):
-        return executor.submit(fetch_all_pages, endpoint, name)
+        return executor.submit(fetch_all_pages, endpoint, name, data_key, bet365_key)
     else:
-        data_key = provider_info.get("data_key", "rows")
-        bet365_key = provider_info.get("bet365_key")
         return executor.submit(fetch_single_response, endpoint, name, data_key, bet365_key)
 
 
 def phase_fetch_data() -> Dict[str, Any]:
-    """Fetch Bet365 + all enabled provider matches concurrently.
+    """Fetch all enabled provider matches concurrently.
+
+    - Providers with separate_bet365=True (e.g. ODDSPORTAL): fetch Bet365 from a separate API
+    - Other providers (SBO, FlashScore, SofaScore): Bet365 is bundled in their API response
 
     Returns: {
-        "bet365": [...],               # shared Bet365 pool (for paginated providers)
         "PROVIDER_NAME": [...],         # provider matches
-        "PROVIDER_NAME_bet365": [...],  # bundled Bet365 pool from non-paginated providers
+        "PROVIDER_NAME_bet365": [...],  # Bet365 matches for that provider
     }
     """
     providers = CONFIG.endpoints.get_active_providers()
     provider_names = [p["name"] for p in providers]
 
-    needs_separate_bet365 = any(p.get("paginated", True) for p in providers)
+    needs_separate_bet365 = [p for p in providers if p.get("separate_bet365")]
 
     logger.info("=" * 60)
-    logger.info("PHASE 2: FETCHING BET365 + PROVIDER DATA")
+    logger.info("PHASE 2: FETCHING PROVIDER DATA")
     logger.info(f"  Providers: {', '.join(provider_names)}")
     if needs_separate_bet365:
-        logger.info("  Fetching shared Bet365 pool (paginated providers need it)")
+        names = [p["name"] for p in needs_separate_bet365]
+        logger.info(f"  Separate Bet365 fetch needed for: {', '.join(names)}")
     logger.info("=" * 60)
 
     results: Dict[str, Any] = {}
@@ -430,28 +445,39 @@ def phase_fetch_data() -> Dict[str, Any]:
         futures = {}
 
         if needs_separate_bet365:
-            futures[executor.submit(fetch_all_pages, BET365_ENDPOINT, "Bet365")] = ("bet365", True)
+            futures[executor.submit(
+                fetch_all_pages, BET365_ENDPOINT, "Bet365"
+            )] = ("_shared_bet365", None)
 
         for p in providers:
-            is_paginated = p.get("paginated", True)
-            futures[_submit_provider_fetch(executor, p)] = (p["name"], is_paginated)
+            futures[_submit_provider_fetch(executor, p)] = (p["name"], p)
 
         for future in as_completed(futures):
-            label, is_paginated = futures[future]
+            label, provider_info = futures[future]
             try:
                 raw = future.result()
-                if is_paginated or label == "bet365":
-                    results[label] = raw
+
+                if label == "_shared_bet365":
+                    shared_b365 = raw["matches"]
+                    for p in needs_separate_bet365:
+                        results[f"{p['name']}_bet365"] = shared_b365
+                    logger.info(f"  [Bet365] fetched {len(shared_b365)} matches (for {', '.join(p['name'] for p in needs_separate_bet365)})")
+                    continue
+
+                results[label] = raw["matches"]
+                if raw.get("bet365"):
+                    results[f"{label}_bet365"] = raw["bet365"]
+                    logger.info(
+                        f"  [{label}] {len(raw['matches'])} provider matches "
+                        f"+ {len(raw['bet365'])} bundled Bet365 matches"
+                    )
                 else:
-                    results[label] = raw["matches"]
-                    if raw.get("bet365"):
-                        results[f"{label}_bet365"] = raw["bet365"]
-                        logger.info(
-                            f"  [{label}] includes {len(raw['bet365'])} bundled Bet365 matches"
-                        )
+                    logger.info(f"  [{label}] {len(raw['matches'])} provider matches")
+
             except Exception as e:
                 logger.error(f"  Failed to fetch {label}: {e}")
-                results[label] = []
+                if label != "_shared_bet365":
+                    results[label] = []
 
     data_dir = CONFIG.data_dir
     os.makedirs(data_dir, exist_ok=True)
@@ -460,8 +486,6 @@ def phase_fetch_data() -> Dict[str, Any]:
             save_json(rows, os.path.join(data_dir, f"{label.lower()}_raw.json"))
 
     summary_parts = []
-    if "bet365" in results:
-        summary_parts.append(f"B365(shared)={len(results['bet365'])}")
     for name in provider_names:
         count = len(results.get(name, []))
         b365_count = len(results.get(f"{name}_bet365", []))
@@ -561,18 +585,10 @@ def _log_match_summary(summary: dict, provider_name: str = ""):
 
 
 def phase_inference(engine: InferenceEngine, fetch_data: Dict[str, Any]) -> dict:
-    """Run batch inference per provider, using each provider's own Bet365 pool when available."""
+    """Run batch inference per provider, using each provider's own Bet365 pool."""
     logger.info("=" * 60)
     logger.info("PHASE 3: RUNNING AI INFERENCE (MULTI-PROVIDER)")
     logger.info("=" * 60)
-
-    shared_bet365_raw = fetch_data.get("bet365", [])
-    shared_b365_records = (
-        [convert_to_match_record(r, "B365") for r in shared_bet365_raw]
-        if shared_bet365_raw else []
-    )
-    if shared_b365_records:
-        logger.info(f"  Shared Bet365 pool: {len(shared_b365_records)} matches")
 
     current_b365_source = None
 
@@ -593,24 +609,19 @@ def phase_inference(engine: InferenceEngine, fetch_data: Dict[str, Any]) -> dict
             provider_reports[name] = {"status": "no_data", "total": 0}
             continue
 
-        is_paginated = provider.get("paginated", True)
         provider_b365_raw = fetch_data.get(f"{name}_bet365", [])
 
-        if provider_b365_raw:
-            b365_records = [convert_to_match_record(r, "B365") for r in provider_b365_raw]
-            b365_source = f"{name}_bundled"
-            logger.info(f"  [{name}] Using bundled Bet365 pool: {len(b365_records)} matches")
-        elif is_paginated and shared_b365_records:
-            b365_records = shared_b365_records
-            b365_source = "shared"
-            logger.info(f"  [{name}] Using shared Bet365 pool: {len(b365_records)} matches")
-        else:
-            logger.warning(f"  [{name}] No Bet365 data available — skipping.")
+        if not provider_b365_raw:
+            logger.warning(f"  [{name}] No Bet365 data in API response — skipping.")
             provider_reports[name] = {"status": "no_bet365_data", "total": 0}
             continue
 
+        b365_records = [convert_to_match_record(r, "B365") for r in provider_b365_raw]
+        b365_source = f"{name}_bet365"
+        logger.info(f"  [{name}] Using Bet365 from {name} API: {len(b365_records)} matches")
+
         if b365_source != current_b365_source:
-            logger.info(f"  Indexing {len(b365_records)} B365 matches (source: {b365_source})...")
+            logger.info(f"  Indexing {len(b365_records)} B365 matches (source: {name} API)...")
             engine.index_b365_pool(b365_records)
             current_b365_source = b365_source
 
@@ -737,13 +748,13 @@ def run_cycle(engine: InferenceEngine, cycle_num: int) -> dict:
         except Exception as e:
             logger.error(f"Phase 2 (fetch) failed: {e}\n{traceback.format_exc()}")
             report["phases"]["fetch"] = {"status": "error", "error": str(e)}
-            data = {"bet365": []}
+            data = {}
 
         if _shutdown.is_set():
             report["aborted"] = True
             return report
 
-        has_any_bet365 = bool(data.get("bet365")) or any(
+        has_any_bet365 = any(
             k.endswith("_bet365") and data.get(k) for k in data
         )
         if has_any_bet365:
