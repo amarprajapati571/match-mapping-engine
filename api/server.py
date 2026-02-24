@@ -12,6 +12,7 @@ Endpoints:
 8. POST /models/reload   → Hot-reload models (feature flag)
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -124,38 +125,48 @@ async def predict(request: PredictRequest):
     Generate Top-5 mapping candidates for an OP match.
     Returns candidates with scores + AUTO_MATCH / NEED_REVIEW decision.
     """
-    if engine._b365_index is None:
+    if engine._b365_index_np is None:
         raise HTTPException(
             status_code=503,
             detail="B365 index not built. Call POST /index/refresh first."
         )
-    
-    suggestion = engine.predict(request.op_match)
-    
+
+    # Offload CPU/GPU-bound inference to thread pool to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    suggestion = await loop.run_in_executor(None, engine.predict, request.op_match)
+
     # Cache suggestion for later feedback processing
     feedback_store.store_suggestion(suggestion)
-    
+
     return suggestion
 
 
 @app.post("/predict/batch", response_model=List[MappingSuggestion])
 async def predict_batch(request: BatchPredictRequest):
     """Batch prediction for multiple OP matches."""
-    if engine._b365_index is None:
+    if engine._b365_index_np is None:
         raise HTTPException(status_code=503, detail="B365 index not built.")
-    
-    suggestions = engine.predict_batch(request.op_matches)
-    
+
+    # Offload CPU/GPU-bound inference to thread pool to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    suggestions = await loop.run_in_executor(
+        None, engine.predict_batch, request.op_matches,
+    )
+
     for s in suggestions:
         feedback_store.store_suggestion(s)
-    
+
     return suggestions
 
 
 @app.post("/index/refresh")
 async def refresh_index(request: IndexRefreshRequest):
     """Re-index the B365 match pool."""
-    engine.index_b365_pool(request.b365_matches)
+    # Offload CPU/GPU-bound indexing to thread pool
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None, engine.index_b365_pool, request.b365_matches,
+    )
     return {
         "status": "ok",
         "pool_size": len(request.b365_matches),

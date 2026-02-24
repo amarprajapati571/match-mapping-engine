@@ -102,6 +102,7 @@ class Candidate(BaseModel):
     time_diff_minutes: float
     swapped: bool = False            # True if home/away were swapped to get best score
     category_tags: List[str] = []
+    team_similarity: float = 0.0     # Pre-computed team name similarity (0-1)
 
 
 class MappingSuggestion(BaseModel):

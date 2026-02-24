@@ -96,14 +96,13 @@ class DatasetBuilder:
             can_stratify = n_classes >= 2 and min_per_class >= 3
 
             if can_stratify:
+                # Build O(1) lookup instead of O(n) .index() per key
+                key_to_label = {k: l for k, l in zip(group_keys, group_labels)}
                 train_val_keys, test_keys_list = train_test_split(
                     group_keys, test_size=test_r,
                     stratify=group_labels, random_state=seed,
                 )
-                tv_labels = [
-                    group_labels[group_keys.index(k)]
-                    for k in train_val_keys
-                ]
+                tv_labels = [key_to_label[k] for k in train_val_keys]
                 val_frac = val_r / (train_r + val_r)
                 train_keys_list, val_keys_list = train_test_split(
                     train_val_keys, test_size=val_frac,
@@ -262,34 +261,12 @@ class DatasetBuilder:
         return pairs
 
     @staticmethod
-    def build_sbert_examples(pairs: List[TrainingPair]) -> List[InputExample]:
-        """
-        Build InputExamples for SBERT training with CosineSimilarityLoss.
-        Uses BOTH positive (label=1.0) and negative (label=0.0) pairs.
-        """
-        examples = [
-            InputExample(
-                texts=[p.anchor_text, p.candidate_text],
-                label=p.label,
-            )
-            for p in pairs
-        ]
-
-        pos_count = sum(1 for p in pairs if p.label == 1.0)
-        neg_count = sum(1 for p in pairs if p.label == 0.0)
-        logger.info(
-            f"Built {len(examples)} SBERT examples "
-            f"(pos={pos_count}, neg={neg_count})"
-        )
-        return examples
-
-    @staticmethod
-    def build_cross_encoder_examples(
-        pairs: List[TrainingPair],
+    def build_examples(
+        pairs: List[TrainingPair], model_type: str = "SBERT",
     ) -> List[InputExample]:
         """
-        Build InputExamples for Cross-Encoder training.
-        Uses both positives (label=1) and hard negatives (label=0).
+        Build InputExamples for SBERT or Cross-Encoder training.
+        Uses both positive (label=1.0) and negative (label=0.0) pairs.
         """
         examples = [
             InputExample(
@@ -300,12 +277,16 @@ class DatasetBuilder:
         ]
 
         pos_count = sum(1 for p in pairs if p.label == 1.0)
-        neg_count = sum(1 for p in pairs if p.label == 0.0)
+        neg_count = len(examples) - pos_count
         logger.info(
-            f"Built {len(examples)} CE examples "
+            f"Built {len(examples)} {model_type} examples "
             f"(pos={pos_count}, neg={neg_count})"
         )
         return examples
+
+    # Aliases for backward compatibility
+    build_sbert_examples = staticmethod(lambda pairs: DatasetBuilder.build_examples(pairs, "SBERT"))
+    build_cross_encoder_examples = staticmethod(lambda pairs: DatasetBuilder.build_examples(pairs, "CE"))
 
     @staticmethod
     def validate_no_contamination(pairs: List[TrainingPair]) -> bool:
@@ -398,6 +379,11 @@ class SBERTTrainer:
         grad_accum = CONFIG.training.gradient_accumulation_steps
         num_workers = CONFIG.training.dataloader_workers
 
+        # MPS safety: multiprocessing workers cannot share MPS tensors
+        if device == "mps" and num_workers > 0:
+            logger.warning(f"Forcing num_workers=0 on MPS (was {num_workers}) — MPS cannot share tensors across processes")
+            num_workers = 0
+
         train_loss = losses.CosineSimilarityLoss(self.model)
 
         evaluator = None
@@ -429,13 +415,17 @@ class SBERTTrainer:
                 eval_dataset = self._examples_to_dataset(val_examples)
 
             has_eval = eval_dataset is not None
+            # Compute warmup_steps from ratio (warmup_ratio is deprecated in v5.2+)
+            steps_per_epoch = max(1, len(train_dataset) // batch_size)
+            total_steps = steps_per_epoch * epochs
+            warmup_steps = int(total_steps * warmup_ratio)
             training_args = SentenceTransformerTrainingArguments(
                 output_dir=output_path,
                 num_train_epochs=epochs,
                 per_device_train_batch_size=batch_size,
                 gradient_accumulation_steps=grad_accum,
                 learning_rate=lr,
-                warmup_ratio=warmup_ratio,
+                warmup_steps=warmup_steps,
                 fp16=use_amp and device == "cuda",
                 dataloader_num_workers=num_workers,
                 dataloader_pin_memory=torch.cuda.is_available(),
@@ -545,6 +535,15 @@ class CrossEncoderTrainer:
         use_amp = CONFIG.training.use_amp
         grad_accum = CONFIG.training.gradient_accumulation_steps
         device = CONFIG.model.device
+        num_workers = CONFIG.training.dataloader_workers
+
+        # MPS safety: multiprocessing workers cannot share MPS tensors
+        if device == "mps":
+            if num_workers > 0:
+                logger.warning(f"Forcing num_workers=0 on MPS (was {num_workers})")
+                num_workers = 0
+            use_amp = False  # AMP not supported on MPS
+
         effective_batch = batch_size * grad_accum
         logger.info(
             f"Training CrossEncoder on {device}: {len(train_examples)} examples, "
@@ -558,15 +557,19 @@ class CrossEncoderTrainer:
                 CrossEncoderTrainingArguments,
             )
 
+            # Compute warmup_steps from ratio (warmup_ratio is deprecated in v5.2+)
+            steps_per_epoch = max(1, len(train_dataset) // batch_size)
+            total_steps_ce = steps_per_epoch * epochs
+            warmup_steps_ce = int(total_steps_ce * warmup_ratio)
             training_args = CrossEncoderTrainingArguments(
                 output_dir=output_path,
                 num_train_epochs=epochs,
                 per_device_train_batch_size=batch_size,
                 gradient_accumulation_steps=grad_accum,
                 learning_rate=lr,
-                warmup_ratio=warmup_ratio,
+                warmup_steps=warmup_steps_ce,
                 fp16=use_amp,
-                dataloader_num_workers=CONFIG.training.dataloader_workers,
+                dataloader_num_workers=num_workers,
                 dataloader_pin_memory=device == "cuda",
                 save_strategy="epoch",
                 logging_steps=50,

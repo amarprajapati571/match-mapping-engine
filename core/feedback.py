@@ -43,8 +43,10 @@ class FeedbackStore:
         self._op_to_b365: Dict[str, str] = {}
         # b365_match_id → confirmed op_match_id (reverse 1:1)
         self._b365_to_op: Dict[str, str] = {}
-        # Training pairs
+        # Training pairs (all, plus indexed sublists for O(1) access)
         self._training_pairs: List[TrainingPair] = []
+        self._positives: List[TrainingPair] = []
+        self._hard_negatives: List[TrainingPair] = []
     
     def store_suggestion(self, suggestion: MappingSuggestion):
         """Cache a suggestion for later feedback processing."""
@@ -108,6 +110,11 @@ class FeedbackStore:
             feedback, suggestion, op_record, b365_records
         )
         self._training_pairs.extend(pairs)
+        for p in pairs:
+            if p.label == 1.0:
+                self._positives.append(p)
+            if p.is_hard_negative:
+                self._hard_negatives.append(p)
         
         logger.info(
             f"Feedback ingested: {feedback.decision.value} for "
@@ -212,17 +219,25 @@ class FeedbackStore:
     
     # ── Getters ──
     
+    def add_training_pair(self, pair: TrainingPair):
+        """Add a training pair and update indexed sublists."""
+        self._training_pairs.append(pair)
+        if pair.label == 1.0:
+            self._positives.append(pair)
+        if pair.is_hard_negative:
+            self._hard_negatives.append(pair)
+
     def get_training_pairs(self) -> List[TrainingPair]:
         """Return all training pairs."""
         return list(self._training_pairs)
     
     def get_positives(self) -> List[TrainingPair]:
-        """Return only positive training pairs."""
-        return [p for p in self._training_pairs if p.label == 1.0]
-    
+        """Return only positive training pairs (O(1) via pre-indexed list)."""
+        return list(self._positives)
+
     def get_hard_negatives(self) -> List[TrainingPair]:
-        """Return only hard negative pairs."""
-        return [p for p in self._training_pairs if p.is_hard_negative]
+        """Return only hard negative pairs (O(1) via pre-indexed list)."""
+        return list(self._hard_negatives)
     
     def get_feedback_count(self) -> Dict[str, int]:
         """Count feedbacks by decision type."""
@@ -314,7 +329,7 @@ class BulkFeedbackLoader:
                         )
                     
                     # Positive pair
-                    store._training_pairs.append(TrainingPair(
+                    store.add_training_pair(TrainingPair(
                         anchor_text=anchor,
                         candidate_text=b365_text,
                         label=1.0,
@@ -334,7 +349,7 @@ class BulkFeedbackLoader:
                             cand.get("b365_away", cand.get("away_team", "")),
                             cand_cats,
                         )
-                        store._training_pairs.append(TrainingPair(
+                        store.add_training_pair(TrainingPair(
                             anchor_text=op_text,
                             candidate_text=cand_text,
                             label=0.0,
@@ -352,7 +367,7 @@ class BulkFeedbackLoader:
                             cand.get("b365_away", cand.get("away_team", "")),
                             cand_cats,
                         )
-                        store._training_pairs.append(TrainingPair(
+                        store.add_training_pair(TrainingPair(
                             anchor_text=op_text,
                             candidate_text=cand_text,
                             label=0.0,
@@ -630,7 +645,7 @@ class CSEFeedbackLoader:
                 provider_id = str(row.get("provider_id", row.get("op_match_id", f"cse_{i}")))
 
                 if decision == Decision.MATCH:
-                    store._training_pairs.append(TrainingPair(
+                    store.add_training_pair(TrainingPair(
                         anchor_text=op_text,
                         candidate_text=b365_text,
                         label=1.0,
@@ -641,7 +656,7 @@ class CSEFeedbackLoader:
                     counts["correct"] += 1
 
                 elif decision == Decision.NO_MATCH:
-                    store._training_pairs.append(TrainingPair(
+                    store.add_training_pair(TrainingPair(
                         anchor_text=op_text,
                         candidate_text=b365_text,
                         label=0.0,
@@ -655,14 +670,14 @@ class CSEFeedbackLoader:
                     swapped_text = build_swapped_text(
                         op_league, op_home, op_away, op_cats
                     )
-                    store._training_pairs.append(TrainingPair(
+                    store.add_training_pair(TrainingPair(
                         anchor_text=swapped_text,
                         candidate_text=b365_text,
                         label=1.0,
                         is_hard_negative=False,
                         source_suggestion_id=f"cse_feedback_{provider_id}",
                     ))
-                    store._training_pairs.append(TrainingPair(
+                    store.add_training_pair(TrainingPair(
                         anchor_text=op_text,
                         candidate_text=b365_text,
                         label=0.0,

@@ -157,9 +157,9 @@ def detect_categories(text: str) -> List[str]:
 
 def strip_category_tokens(text: str) -> str:
     """Remove category indicators from text for cleaner matching."""
-    for patterns in CATEGORY_PATTERNS.values():
-        for p in patterns:
-            text = re.sub(p, " ", text, flags=re.IGNORECASE)
+    for compiled_patterns in _COMPILED_CATEGORY_PATTERNS.values():
+        for p in compiled_patterns:
+            text = p.sub(" ", text)
     text = _MULTI_SPACE.sub(" ", text).strip()
     return text
 

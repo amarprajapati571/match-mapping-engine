@@ -36,6 +36,11 @@ DEVICE = os.getenv("DEVICE", "auto")
 if DEVICE == "auto":
     DEVICE = _detect_device()
 
+# ── CUDA Performance: enable cuDNN auto-tuner for consistent-size inputs ──
+if DEVICE == "cuda":
+    torch.backends.cudnn.benchmark = True
+    _logger.info("cuDNN benchmark mode enabled (faster for fixed-size inputs)")
+
 
 @dataclass
 class ModelConfig:

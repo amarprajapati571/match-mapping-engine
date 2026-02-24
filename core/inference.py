@@ -280,15 +280,6 @@ class InferenceEngine:
         return results[:top_k]
 
     # ══════════════════════════════════════════
-    # Score Normalization
-    # ══════════════════════════════════════════
-
-    @staticmethod
-    def _normalize_scores(scores: List[float]) -> np.ndarray:
-        """Vectorized sigmoid normalization of cross-encoder logits."""
-        return _sigmoid_np(np.asarray(scores, dtype=np.float64))
-
-    # ══════════════════════════════════════════
     # Single-Query Inference
     # ══════════════════════════════════════════
 
@@ -523,6 +514,7 @@ class InferenceEngine:
                 time_diff_minutes=round(time_diff, 1),
                 swapped=use_swapped,
                 category_tags=b365.category_tags,
+                team_similarity=round(team_sim, 4),
             ))
 
         candidates.sort(key=lambda c: c.score, reverse=True)
@@ -618,11 +610,9 @@ class InferenceEngine:
         if top1.time_diff_minutes <= gates.tight_kickoff_minutes:
             details["kickoff_gate"] = True
 
-        team_sim, _ = compute_team_similarity(
-            op_match.home_team, op_match.away_team,
-            top1.b365_home, top1.b365_away,
-        )
-        details["team_similarity"] = round(team_sim, 4)
+        # Use pre-computed team_similarity from _build_suggestion (avoid recomputation)
+        team_sim = top1.team_similarity
+        details["team_similarity"] = team_sim
         details["min_team_similarity_threshold"] = gates.min_team_similarity
         if team_sim >= gates.min_team_similarity:
             details["team_name_gate"] = True
