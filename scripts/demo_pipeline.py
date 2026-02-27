@@ -244,7 +244,7 @@ def main():
         for c in suggestion.candidates_top5[:3]:
             marker = "✓" if c.b365_match_id == b365_id else " "
             print(f"   {marker} #{c.rank}: {c.b365_home} vs {c.b365_away} "
-                  f"(score={c.score:.4f}, Δt={c.time_diff_minutes}m, swap={c.swapped})")
+                  f"(score={c.score:.4f}, Δt={c.time_diff_minutes / 60.0:.1f}h, swap={c.swapped})")
     
     # ── Step 4: Simulate Feedback Ingestion ──
     print("\n💬 Step 4: Ingesting human feedback (simulated)...")

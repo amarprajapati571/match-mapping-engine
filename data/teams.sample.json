@@ -1,0 +1,62 @@
+[
+  {
+    "team_name_en": "Manchester United",
+    "team_abbreviation": "MUN",
+    "keywords": ["Man Utd", "Man United", "MUFC"]
+  },
+  {
+    "team_name_en": "Manchester City",
+    "team_abbreviation": "MCI",
+    "keywords": ["Man City", "MCFC"]
+  },
+  {
+    "team_name_en": "Liverpool",
+    "team_abbreviation": "LIV",
+    "keywords": ["Liverpool FC", "LFC"]
+  },
+  {
+    "team_name_en": "Real Madrid",
+    "team_abbreviation": "RMA",
+    "keywords": ["Real Madrid CF", "R. Madrid"]
+  },
+  {
+    "team_name_en": "Barcelona",
+    "team_abbreviation": "BAR",
+    "keywords": ["FC Barcelona", "Barca", "FCB"]
+  },
+  {
+    "team_name_en": "Bayern Munich",
+    "team_abbreviation": "BAY",
+    "keywords": ["FC Bayern", "Bayern Munchen", "FCB Munich"]
+  },
+  {
+    "team_name_en": "Borussia Dortmund",
+    "team_abbreviation": "BVB",
+    "keywords": ["Dortmund", "BVB 09"]
+  },
+  {
+    "team_name_en": "Paris Saint-Germain",
+    "team_abbreviation": "PSG",
+    "keywords": ["Paris SG", "Paris Saint Germain"]
+  },
+  {
+    "team_name_en": "Mumbai Indians",
+    "team_abbreviation": "MI",
+    "keywords": ["Mumbai", "MI IPL"]
+  },
+  {
+    "team_name_en": "Chennai Super Kings",
+    "team_abbreviation": "CSK",
+    "keywords": ["Chennai", "CSK IPL"]
+  },
+  {
+    "team_name_en": "Los Angeles Lakers",
+    "team_abbreviation": "LAL",
+    "keywords": ["LA Lakers", "Lakers"]
+  },
+  {
+    "team_name_en": "Golden State Warriors",
+    "team_abbreviation": "GSW",
+    "keywords": ["Warriors", "GS Warriors"]
+  }
+]

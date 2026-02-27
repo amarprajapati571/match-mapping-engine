@@ -1,16 +1,17 @@
 """
-Automated Scheduler — Runs the full pipeline on a configurable interval.
+Automated Scheduler — Runs the inference pipeline on a configurable interval.
 
 Cycle (repeats every SCHEDULER_INTERVAL_MINUTES, default 45):
 
-  Phase 1  SELF-TRAIN
-    Fetch CSE feedback → convert to training pairs → train models → reload
-
-  Phase 2  FETCH DATA
+  Phase 1  FETCH DATA
     Fetch all provider matches concurrently — each API returns provider + Bet365 data
 
-  Phase 3  INFERENCE
+  Phase 2  INFERENCE
     Per-provider: index that provider's Bet365 pool → batch inference → save → optionally push
+
+Training is NOT part of the scheduler — it runs separately on demand:
+  - CLI:  python scripts/self_train_pipeline.py --platform ODDSPORTAL
+  - API:  POST /self-train
 
 All timings are configurable via environment variables (see .env.example).
 
@@ -18,8 +19,7 @@ Usage:
     python scripts/scheduler.py                          # run with defaults
     SCHEDULER_INTERVAL_MINUTES=30 python scripts/scheduler.py
     python scripts/scheduler.py --run-once               # single run, no loop
-    python scripts/scheduler.py --skip-training           # skip Phase 1
-    python scripts/scheduler.py --skip-inference          # skip Phase 2+3
+    python scripts/scheduler.py --skip-inference          # skip Phase 1+2 (dry run)
 """
 
 import sys
@@ -31,14 +31,12 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from threading import Event
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.settings import CONFIG
 from core.inference import InferenceEngine
-from core.feedback import FeedbackStore, CSEFeedbackLoader
-from training.trainer import TrainingOrchestrator, DatasetBuilder
 
 from scripts.pipeline_utils import (
     fetch_all_pages,
@@ -73,94 +71,7 @@ BET365_ENDPOINT = CONFIG.endpoints.bet365_endpoint
 
 
 # ═══════════════════════════════════════════════
-# Phase 1: Self-Training from CSE Feedback
-# ═══════════════════════════════════════════════
-
-def phase_self_train(engine: Optional[InferenceEngine] = None) -> dict:
-    """Fetch CSE feedback, build training pairs, train models if enough data."""
-    logger.info("=" * 60)
-    logger.info("PHASE 1: SELF-TRAINING FROM CSE FEEDBACK")
-    logger.info("=" * 60)
-
-    sched = CONFIG.scheduler
-
-    if sched.use_local_feedback_api:
-        CONFIG.feedback_api.use_local = True
-
-    feedback_rows = CSEFeedbackLoader.fetch_feedback(platform=sched.platform)
-
-    if not feedback_rows:
-        logger.info("  No feedback rows from API — skipping training.")
-        return {"status": "no_feedback", "feedback_rows": 0}
-
-    logger.info(f"  Fetched {len(feedback_rows)} feedback rows")
-
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    os.makedirs("data", exist_ok=True)
-    save_json(feedback_rows, os.path.join("data", f"cse_feedback_{timestamp}.json"))
-
-    store = FeedbackStore()
-    n_pairs, counts = CSEFeedbackLoader.convert_to_training_pairs(feedback_rows, store)
-
-    trainable = counts["correct"] + counts["not_correct"] + counts["need_to_swap"]
-    logger.info(
-        f"  Feedback: correct={counts['correct']}, not_correct={counts['not_correct']}, "
-        f"swap={counts['need_to_swap']}, skipped={counts['not_sure_skipped']}, "
-        f"pairs={n_pairs}"
-    )
-
-    min_feedback = CONFIG.feedback_api.min_feedback_for_training
-    if trainable < min_feedback:
-        logger.info(f"  Insufficient trainable feedback ({trainable} < {min_feedback}) — skipping training.")
-        return {"status": "insufficient_data", "feedback_rows": len(feedback_rows), "trainable": trainable}
-
-    all_pairs = store.get_training_pairs()
-    if not DatasetBuilder.validate_no_contamination(all_pairs):
-        logger.error("  Label contamination detected — aborting training!")
-        return {"status": "contamination_error"}
-
-    os.makedirs("models", exist_ok=True)
-    sbert_out = f"models/sbert_cse_tuned_{timestamp}"
-    ce_out = f"models/ce_cse_tuned_{timestamp}"
-
-    orchestrator = TrainingOrchestrator(all_pairs)
-    result = orchestrator.train_all(sbert_out, ce_out, track_accuracy=True)
-
-    if result.get("accuracy_comparison"):
-        logger.info(result["accuracy_comparison"])
-
-    # Auto-reload models into the engine (only if training actually produced them)
-    sbert_path = result.get("sbert_model_path")
-    ce_path = result.get("cross_encoder_model_path")
-    models_updated = False
-
-    if sbert_path:
-        CONFIG.model.tuned_sbert_path = sbert_path
-        CONFIG.model.use_tuned_sbert = True
-        models_updated = True
-    if ce_path:
-        CONFIG.model.tuned_cross_encoder_path = ce_path
-        CONFIG.model.use_tuned_cross_encoder = True
-        models_updated = True
-
-    if engine and models_updated:
-        engine.reload_models()
-        logger.info("  Models reloaded into inference engine.")
-    elif not models_updated:
-        logger.info("  No new models produced — skipping reload.")
-
-    os.makedirs("reports", exist_ok=True)
-    save_json(
-        {**result, "feedback_counts": counts, "timestamp": timestamp},
-        os.path.join("reports", f"self_train_report_{timestamp}.json"),
-    )
-
-    logger.info("  Phase 1 complete — models trained and reloaded.")
-    return {"status": "trained", "training_result": result, "feedback_counts": counts}
-
-
-# ═══════════════════════════════════════════════
-# Phase 2: Fetch Data from APIs
+# Phase 1: Fetch Data from APIs
 # ═══════════════════════════════════════════════
 
 def phase_fetch_data() -> Dict[str, Any]:
@@ -180,7 +91,7 @@ def phase_fetch_data() -> Dict[str, Any]:
     needs_separate_bet365 = [p for p in providers if p.get("separate_bet365")]
 
     logger.info("=" * 60)
-    logger.info("PHASE 2: FETCHING PROVIDER DATA")
+    logger.info("PHASE 1: FETCHING PROVIDER DATA")
     logger.info(f"  Providers: {', '.join(provider_names)}")
     if needs_separate_bet365:
         names = [p["name"] for p in needs_separate_bet365]
@@ -244,13 +155,13 @@ def phase_fetch_data() -> Dict[str, Any]:
         if b365_count:
             part += f"(+{b365_count} B365)"
         summary_parts.append(part)
-    logger.info(f"  Phase 2 complete — {', '.join(summary_parts)}")
+    logger.info(f"  Phase 1 complete — {', '.join(summary_parts)}")
 
     return results
 
 
 # ═══════════════════════════════════════════════
-# Phase 3: Run Inference + Store Results
+# Phase 2: Run Inference + Store Results
 # ═══════════════════════════════════════════════
 
 def _log_match_summary(summary: dict, provider_name: str = ""):
@@ -298,7 +209,7 @@ def _log_match_summary(summary: dict, provider_name: str = ""):
 def phase_inference(engine: InferenceEngine, fetch_data: Dict[str, Any]) -> dict:
     """Run batch inference per provider, using each provider's own Bet365 pool."""
     logger.info("=" * 60)
-    logger.info("PHASE 3: RUNNING AI INFERENCE (MULTI-PROVIDER)")
+    logger.info("PHASE 2: RUNNING AI INFERENCE (MULTI-PROVIDER)")
     logger.info("=" * 60)
 
     current_b365_source = None
@@ -402,7 +313,7 @@ def phase_inference(engine: InferenceEngine, fetch_data: Dict[str, Any]) -> dict
     elif CONFIG.output.push_to_api:
         logger.info("  No pushable results (all null bet365_match or below threshold).")
 
-    logger.info("  Phase 3 complete.")
+    logger.info("  Phase 2 complete.")
     return {
         "status": "ok",
         "providers": provider_reports,
@@ -420,7 +331,7 @@ def phase_inference(engine: InferenceEngine, fetch_data: Dict[str, Any]) -> dict
 # ═══════════════════════════════════════════════
 
 def run_cycle(engine: InferenceEngine, cycle_num: int) -> dict:
-    """Execute one full cycle: train → fetch → infer."""
+    """Execute one full cycle: fetch → infer (no training)."""
     cycle_start = time.time()
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -437,27 +348,13 @@ def run_cycle(engine: InferenceEngine, cycle_num: int) -> dict:
 
     sched = CONFIG.scheduler
 
-    # Phase 1: Self-train
-    if sched.enable_training:
-        try:
-            report["phases"]["training"] = phase_self_train(engine)
-        except Exception as e:
-            logger.error(f"Phase 1 (training) failed: {e}\n{traceback.format_exc()}")
-            report["phases"]["training"] = {"status": "error", "error": str(e)}
-    else:
-        logger.info("Phase 1 (training) — DISABLED via config")
-        report["phases"]["training"] = {"status": "disabled"}
-
-    if _shutdown.is_set():
-        report["aborted"] = True
-        return report
-
-    # Phase 2 + 3: Fetch + Inference
+    # Phase 1: Fetch + Phase 2: Inference
     if sched.enable_inference:
         try:
             data = phase_fetch_data()
+            report["phases"]["fetch"] = {"status": "ok"}
         except Exception as e:
-            logger.error(f"Phase 2 (fetch) failed: {e}\n{traceback.format_exc()}")
+            logger.error(f"Phase 1 (fetch) failed: {e}\n{traceback.format_exc()}")
             report["phases"]["fetch"] = {"status": "error", "error": str(e)}
             data = {}
 
@@ -472,12 +369,12 @@ def run_cycle(engine: InferenceEngine, cycle_num: int) -> dict:
             try:
                 report["phases"]["inference"] = phase_inference(engine, data)
             except Exception as e:
-                logger.error(f"Phase 3 (inference) failed: {e}\n{traceback.format_exc()}")
+                logger.error(f"Phase 2 (inference) failed: {e}\n{traceback.format_exc()}")
                 report["phases"]["inference"] = {"status": "error", "error": str(e)}
         else:
             report["phases"]["inference"] = {"status": "no_bet365_data"}
     else:
-        logger.info("Phase 2+3 (inference) — DISABLED via config")
+        logger.info("Inference — DISABLED via config")
         report["phases"]["fetch"] = {"status": "disabled"}
         report["phases"]["inference"] = {"status": "disabled"}
 
@@ -504,13 +401,11 @@ def run_cycle(engine: InferenceEngine, cycle_num: int) -> dict:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Automated pipeline scheduler")
+    parser = argparse.ArgumentParser(description="Automated inference scheduler (fetch + predict)")
     parser.add_argument("--run-once", action="store_true",
                         help="Run a single cycle and exit (no loop)")
-    parser.add_argument("--skip-training", action="store_true",
-                        help="Disable Phase 1 (self-training) for this run")
     parser.add_argument("--skip-inference", action="store_true",
-                        help="Disable Phase 2+3 (fetch + inference) for this run")
+                        help="Disable fetch + inference for this run (dry run)")
     parser.add_argument("--interval", type=int, default=None,
                         help="Override interval in minutes (default: from env/config)")
     args = parser.parse_args()
@@ -518,8 +413,6 @@ def main():
     sched = CONFIG.scheduler
     interval = args.interval or sched.interval_minutes
 
-    if args.skip_training:
-        sched.enable_training = False
     if args.skip_inference:
         sched.enable_inference = False
 
@@ -529,7 +422,7 @@ def main():
     import torch
 
     print("\n" + "=" * 60)
-    print("  AI MATCH MAPPING ENGINE — AUTOMATED SCHEDULER")
+    print("  AI MATCH MAPPING ENGINE — INFERENCE SCHEDULER")
     print("=" * 60)
     out = CONFIG.output
 
@@ -540,16 +433,12 @@ def main():
         vram_gb = props.total_memory / (1024 ** 3)
         print(f"  GPU:              {gpu_name} ({vram_gb:.1f} GB VRAM)")
         print(f"  CUDA Version:     {torch.version.cuda}")
-        print(f"  FP16 Training:    ON")
         print(f"  FP16 Inference:   ON")
     else:
         print(f"  Device:           {device} (no GPU acceleration)")
 
     print(f"  Interval:         {interval} minutes")
     print(f"  Providers:        {', '.join(provider_names)}")
-    print(f"  Training:         {'ON' if sched.enable_training else 'OFF'}")
-    print(f"    SBERT batch:    {CONFIG.training.sbert_batch_size}")
-    print(f"    CE batch:       {CONFIG.training.ce_batch_size} x{CONFIG.training.gradient_accumulation_steps} grad_accum")
     print(f"  Inference:        {'ON' if sched.enable_inference else 'OFF'}")
     print(f"    Encode batch:   {CONFIG.model.encode_batch_size}")
     print(f"    Rerank batch:   {CONFIG.model.rerank_batch_size}")
@@ -558,6 +447,11 @@ def main():
     if out.push_to_api:
         print(f"  Push URL:         {CONFIG.endpoints.store_results_url}")
     print(f"  Confidence:       >= {out.confidence_threshold}")
+    print(f"")
+    print(f"  Training is separate — run when needed:")
+    print(f"    python scripts/self_train_pipeline.py --platform ODDSPORTAL")
+    print(f"    or POST /self-train")
+    print(f"")
     print(f"  Press Ctrl+C to stop gracefully.")
     print("=" * 60 + "\n")
 

@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Match Compare Dashboard</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --pass: #22c55e; --pass-bg: #f0fdf4;
+    --fail: #ef4444; --fail-bg: #fef2f2;
+    --warn: #f59e0b; --warn-bg: #fffbeb;
+    --blue: #3b82f6; --blue-bg: #eff6ff;
+    --green: #10b981; --green-bg: #ecfdf5;
+    --bg: #f1f5f9; --card: #ffffff; --text: #1e293b; --muted: #64748b;
+    --border: #e2e8f0; --radius: 10px;
+    --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+  }
+
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+
+  header { text-align: center; margin-bottom: 28px; }
+  header h1 { font-size: 1.6rem; font-weight: 700; }
+  header p { color: var(--muted); font-size: .9rem; margin-top: 4px; }
+
+  /* ── Input Section ── */
+  .input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  @media (max-width: 768px) { .input-grid { grid-template-columns: 1fr; } }
+
+  .input-card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; border-top: 3px solid var(--border); }
+  .input-card.provider { border-top-color: var(--blue); }
+  .input-card.bet365 { border-top-color: var(--green); }
+
+  .input-card h2 { font-size: .95rem; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .input-card.provider h2 { color: var(--blue); }
+  .input-card.bet365 h2 { color: var(--green); }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .7rem; font-weight: 600; text-transform: uppercase; }
+  .badge.provider { background: var(--blue-bg); color: var(--blue); }
+  .badge.bet365 { background: var(--green-bg); color: var(--green); }
+
+  textarea {
+    width: 100%; min-height: 260px; padding: 12px; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: .82rem; line-height: 1.45; border: 1px solid var(--border); border-radius: 8px;
+    resize: vertical; background: #f8fafc; color: var(--text); outline: none; transition: border-color .2s;
+  }
+  textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+  textarea::placeholder { color: #94a3b8; }
+
+  .hint { font-size: .75rem; color: var(--muted); margin-top: 6px; }
+
+  /* ── Submit ── */
+  .submit-row { text-align: center; margin-bottom: 28px; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 32px; font-size: .95rem; font-weight: 600; color: #fff;
+    background: linear-gradient(135deg, var(--blue), #2563eb); border: none; border-radius: 8px;
+    cursor: pointer; transition: transform .15s, box-shadow .15s;
+    box-shadow: 0 2px 8px rgba(37,99,235,.3);
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(37,99,235,.35); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { opacity: .6; cursor: not-allowed; transform: none; }
+
+  .spinner { display: none; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
+  .btn.loading .spinner { display: inline-block; }
+  .btn.loading .btn-text { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Error ── */
+  .error-banner { background: var(--fail-bg); color: var(--fail); border: 1px solid #fca5a5; border-radius: var(--radius); padding: 12px 16px; margin-bottom: 20px; display: none; font-size: .9rem; }
+
+  /* ── Results Section ── */
+  #results { display: none; }
+
+  .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; margin-bottom: 16px; }
+  .card h3 { font-size: .85rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 14px; }
+
+  /* Verdict Banner */
+  .verdict-banner { text-align: center; padding: 24px; border-radius: var(--radius); margin-bottom: 16px; }
+  .verdict-banner.match { background: linear-gradient(135deg, #dcfce7, #bbf7d0); border: 1px solid #86efac; }
+  .verdict-banner.swapped { background: linear-gradient(135deg, #fef3c7, #fde68a); border: 1px solid #fcd34d; }
+  .verdict-banner.no-match { background: linear-gradient(135deg, #fee2e2, #fecaca); border: 1px solid #fca5a5; }
+
+  .verdict-label { font-size: 1.5rem; font-weight: 800; margin-bottom: 4px; }
+  .verdict-banner.match .verdict-label { color: #166534; }
+  .verdict-banner.swapped .verdict-label { color: #92400e; }
+  .verdict-banner.no-match .verdict-label { color: #991b1b; }
+  .verdict-reason { font-size: .85rem; color: var(--muted); }
+
+  /* Confidence Meter */
+  .confidence-section { text-align: center; margin-bottom: 8px; }
+  .confidence-value { font-size: 2.2rem; font-weight: 800; }
+  .confidence-bar { height: 10px; background: #e2e8f0; border-radius: 5px; overflow: hidden; margin-top: 10px; }
+  .confidence-fill { height: 100%; border-radius: 5px; transition: width .5s ease; }
+
+  /* Scores Grid */
+  .scores-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .score-item { background: #f8fafc; border-radius: 8px; padding: 14px; text-align: center; }
+  .score-item .label { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+  .score-item .value { font-size: 1.15rem; font-weight: 700; }
+
+  /* Swap Section */
+  .swap-row { display: flex; align-items: center; gap: 12px; padding: 14px; background: #f8fafc; border-radius: 8px; }
+  .swap-indicator { font-size: 1.1rem; font-weight: 700; padding: 4px 14px; border-radius: 6px; }
+  .swap-indicator.yes { background: var(--warn-bg); color: #92400e; }
+  .swap-indicator.no { background: var(--pass-bg); color: #166534; }
+  .swap-detail { font-size: .85rem; color: var(--muted); }
+
+  /* Gate Table */
+  .gate-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+  .gate-table th { text-align: left; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 8px 12px; border-bottom: 2px solid var(--border); }
+  .gate-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: .85rem; }
+  .gate-table tr:last-child td { border-bottom: none; }
+
+  .gate-status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: .8rem; padding: 3px 10px; border-radius: 20px; }
+  .gate-status.pass { background: var(--pass-bg); color: #166534; }
+  .gate-status.fail { background: var(--fail-bg); color: #991b1b; }
+  .gate-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .gate-status.pass .gate-dot { background: var(--pass); }
+  .gate-status.fail .gate-dot { background: var(--fail); }
+
+  /* Debug Section */
+  .debug-toggle { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px; }
+  .debug-toggle .arrow { transition: transform .2s; font-size: .8rem; }
+  .debug-toggle.open .arrow { transform: rotate(90deg); }
+  .debug-content { display: none; margin-top: 12px; }
+  .debug-content.open { display: block; }
+  .debug-text { background: #f8fafc; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-family: monospace; font-size: .8rem; word-break: break-all; margin-bottom: 8px; }
+  .debug-label { font-size: .72rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <h1>Match Compare Dashboard</h1>
+    <p>Paste provider and Bet365 match JSON to compare them directly</p>
+  </header>
+
+  <!-- Input Section -->
+  <div class="input-grid">
+    <div class="input-card provider">
+      <h2><span class="badge provider">Provider</span> Match JSON</h2>
+      <textarea id="provider-json" placeholder='{
+  "home_team": "Arsenal",
+  "away_team": "Chelsea",
+  "league": { "name": "Premier League" },
+  "sport": "soccer",
+  "sport_id": "1",
+  "commence_time": 1740600000
+}'></textarea>
+      <div class="hint">Paste raw match JSON. Supports league as string or object, commence_time as timestamp or ISO string.</div>
+    </div>
+    <div class="input-card bet365">
+      <h2><span class="badge bet365">Bet365</span> Match JSON</h2>
+      <textarea id="bet365-json" placeholder='{
+  "home_team": "Arsenal FC",
+  "away_team": "Chelsea FC",
+  "league": { "name": "Premier League" },
+  "sport": "soccer",
+  "sport_id": "1",
+  "commence_time": 1740600000
+}'></textarea>
+      <div class="hint">Paste raw match JSON. Same format as provider match.</div>
+    </div>
+  </div>
+
+  <div class="submit-row">
+    <button class="btn" id="submit-btn" onclick="submitCompare()">
+      <span class="btn-text">Compare Matches</span>
+      <span class="spinner"></span>
+    </button>
+  </div>
+
+  <div class="error-banner" id="error-banner"></div>
+
+  <!-- Results Section -->
+  <div id="results">
+
+    <!-- Verdict -->
+    <div class="verdict-banner" id="verdict-banner">
+      <div class="verdict-label" id="verdict-label"></div>
+      <div class="verdict-reason" id="verdict-reason"></div>
+    </div>
+
+    <!-- Confidence -->
+    <div class="card">
+      <h3>Confidence Score</h3>
+      <div class="confidence-section">
+        <div class="confidence-value" id="confidence-value"></div>
+        <div class="confidence-bar">
+          <div class="confidence-fill" id="confidence-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scores -->
+    <div class="card">
+      <h3>Detailed Scores</h3>
+      <div class="scores-grid" id="scores-grid"></div>
+    </div>
+
+    <!-- Swap Detection -->
+    <div class="card">
+      <h3>Swap Detection</h3>
+      <div class="swap-row" id="swap-row"></div>
+    </div>
+
+    <!-- Gate Evaluation -->
+    <div class="card">
+      <h3>Gate Evaluation</h3>
+      <table class="gate-table">
+        <thead>
+          <tr><th>Gate</th><th>Value</th><th>Threshold</th><th>Status</th></tr>
+        </thead>
+        <tbody id="gate-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Debug -->
+    <div class="card">
+      <div class="debug-toggle" id="debug-toggle" onclick="toggleDebug()">
+        <span class="arrow">&#9654;</span>
+        <h3 style="margin:0">Text Representations (Debug)</h3>
+      </div>
+      <div class="debug-content" id="debug-content">
+        <div class="debug-label">Provider (Normal)</div>
+        <div class="debug-text" id="debug-provider"></div>
+        <div class="debug-label">Provider (Swapped)</div>
+        <div class="debug-text" id="debug-swapped"></div>
+        <div class="debug-label">Bet365</div>
+        <div class="debug-text" id="debug-bet365"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const SPORT_ID_MAP = {
+  '1': 'soccer', '2': 'tennis', '3': 'basketball', '4': 'hockey',
+  '5': 'volleyball', '6': 'handball', '7': 'baseball',
+  '8': 'american_football', '9': 'rugby', '10': 'boxing',
+  '12': 'table_tennis', '13': 'cricket', '18': 'esports',
+};
+
+function parseMatchJSON(raw) {
+  const obj = JSON.parse(raw);
+
+  const home_team = obj.home_team || '';
+  const away_team = obj.away_team || '';
+
+  // league: could be string or { name: "..." }
+  let league = '';
+  if (typeof obj.league === 'string') {
+    league = obj.league;
+  } else if (obj.league && typeof obj.league === 'object') {
+    league = obj.league.name || '';
+  }
+
+  // sport: string or derive from sport_id
+  let sport = obj.sport || '';
+  if (!sport && obj.sport_id) {
+    sport = SPORT_ID_MAP[String(obj.sport_id)] || 'soccer';
+  }
+  if (!sport) sport = 'soccer';
+
+  // kickoff: commence_time (timestamp or ISO) or kickoff field
+  let kickoff;
+  const ct = obj.commence_time || obj.kickoff;
+  if (typeof ct === 'number') {
+    kickoff = new Date(ct * 1000).toISOString();
+  } else if (typeof ct === 'string') {
+    kickoff = new Date(ct).toISOString();
+  } else {
+    kickoff = new Date().toISOString();
+  }
+
+  return { home_team, away_team, league, sport, kickoff };
+}
+
+async function submitCompare() {
+  const btn = document.getElementById('submit-btn');
+  const errorBanner = document.getElementById('error-banner');
+  const resultsDiv = document.getElementById('results');
+
+  errorBanner.style.display = 'none';
+  resultsDiv.style.display = 'none';
+
+  // Parse inputs
+  let provider, bet365;
+  try {
+    provider = parseMatchJSON(document.getElementById('provider-json').value);
+  } catch (e) {
+    errorBanner.textContent = 'Invalid Provider JSON: ' + e.message;
+    errorBanner.style.display = 'block';
+    return;
+  }
+  try {
+    bet365 = parseMatchJSON(document.getElementById('bet365-json').value);
+  } catch (e) {
+    errorBanner.textContent = 'Invalid Bet365 JSON: ' + e.message;
+    errorBanner.style.display = 'block';
+    return;
+  }
+
+  btn.classList.add('loading');
+  btn.disabled = true;
+
+  try {
+    const resp = await fetch('/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider_match: provider, bet365_match: bet365 }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || 'Request failed');
+    }
+
+    const data = await resp.json();
+    renderResults(data);
+  } catch (e) {
+    errorBanner.textContent = 'Error: ' + e.message;
+    errorBanner.style.display = 'block';
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
+function renderResults(d) {
+  const resultsDiv = document.getElementById('results');
+
+  // Verdict banner
+  const banner = document.getElementById('verdict-banner');
+  banner.className = 'verdict-banner';
+  if (d.verdict === 'MATCH') banner.classList.add('match');
+  else if (d.verdict === 'SWAPPED_MATCH') banner.classList.add('swapped');
+  else banner.classList.add('no-match');
+
+  const labelMap = { 'MATCH': 'MATCH', 'SWAPPED_MATCH': 'NEED TO SWAP', 'NO_MATCH': 'NO MATCH' };
+  document.getElementById('verdict-label').textContent = labelMap[d.verdict] || d.verdict;
+  document.getElementById('verdict-reason').textContent = d.verdict_reason;
+
+  // Confidence
+  const pct = (d.confidence_score * 100).toFixed(1);
+  document.getElementById('confidence-value').textContent = pct + '%';
+  const fill = document.getElementById('confidence-fill');
+  fill.style.width = pct + '%';
+  fill.style.background = confidenceColor(d.confidence_score);
+
+  // Scores grid
+  const scores = [
+    { label: 'Final Score', value: d.confidence_score.toFixed(4) },
+    { label: 'CE Normal', value: d.normal_ce_score.toFixed(4) },
+    { label: 'CE Swapped', value: d.swapped_ce_score.toFixed(4) },
+    { label: 'CE Normalized', value: d.cross_encoder_normalized.toFixed(4) },
+    { label: 'Team Similarity', value: d.team_similarity.toFixed(4) },
+    { label: 'League Similarity', value: d.league_similarity.toFixed(4) },
+    { label: 'Time Diff', value: d.time_diff_hours.toFixed(2) + 'h (' + d.time_diff_minutes.toFixed(0) + 'm)' },
+    { label: 'Sport', value: d.sport_match ? d.provider_sport : d.provider_sport + ' vs ' + d.bet365_sport },
+    { label: 'Categories Match', value: d.categories_match ? 'Yes' : 'No' },
+  ];
+  const grid = document.getElementById('scores-grid');
+  grid.innerHTML = scores.map(s =>
+    `<div class="score-item"><div class="label">${s.label}</div><div class="value">${s.value}</div></div>`
+  ).join('');
+
+  // Swap detection
+  const swapRow = document.getElementById('swap-row');
+  const swapClass = d.is_swapped ? 'yes' : 'no';
+  const swapLabel = d.is_swapped ? 'YES' : 'NO';
+  const swapDetail = d.is_swapped
+    ? `Teams are swapped (detected via ${d.swap_reason}). Normal CE: ${d.normal_ce_score.toFixed(4)}, Swapped CE: ${d.swapped_ce_score.toFixed(4)}`
+    : `Teams are in correct order. Normal CE: ${d.normal_ce_score.toFixed(4)}, Swapped CE: ${d.swapped_ce_score.toFixed(4)}`;
+  swapRow.innerHTML = `<span class="swap-indicator ${swapClass}">${swapLabel}</span><span class="swap-detail">${swapDetail}</span>`;
+
+  // Gate table
+  const tbody = document.getElementById('gate-tbody');
+  tbody.innerHTML = d.gates.map(g => {
+    const cls = g.passed ? 'pass' : 'fail';
+    const statusLabel = g.passed ? 'PASS' : 'FAIL';
+    return `<tr>
+      <td style="font-weight:600">${formatGateName(g.name)}</td>
+      <td>${g.actual_value}</td>
+      <td>${g.threshold}</td>
+      <td><span class="gate-status ${cls}"><span class="gate-dot"></span>${statusLabel}</span></td>
+    </tr>`;
+  }).join('');
+
+  // Debug
+  document.getElementById('debug-provider').textContent = d.provider_text;
+  document.getElementById('debug-swapped').textContent = d.provider_swapped_text;
+  document.getElementById('debug-bet365').textContent = d.bet365_text;
+
+  resultsDiv.style.display = 'block';
+  resultsDiv.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function confidenceColor(score) {
+  if (score >= 0.8) return '#22c55e';
+  if (score >= 0.5) return '#f59e0b';
+  return '#ef4444';
+}
+
+function formatGateName(name) {
+  return name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function toggleDebug() {
+  const toggle = document.getElementById('debug-toggle');
+  const content = document.getElementById('debug-content');
+  toggle.classList.toggle('open');
+  content.classList.toggle('open');
+}
+</script>
+</body>
+</html>

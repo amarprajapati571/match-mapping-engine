@@ -25,6 +25,10 @@ checkpoints/
 data/*.json
 data/*.csv
 !data/.gitkeep
+!data/admin_leagues.json
+!data/admin_teams.json
+!data/leagues.sample.json
+!data/teams.sample.json
 
 # ── Training Data (uploaded JSON files) ──────────────────
 training_data/*.json

@@ -255,7 +255,7 @@ def convert_to_match_record(raw: Dict[str, Any], platform_tag: str) -> MatchReco
 
 def _gate_to_reason(gate_decision: str, score: float) -> str:
     if gate_decision == "AUTO_MATCH":
-        return "rule_based_strong_match"
+        return "AUTO_MAP"
     if score >= 0.80:
         return "ai_high_confidence"
     if score >= CONFIDENCE_THRESHOLD:
@@ -266,7 +266,11 @@ def _gate_to_reason(gate_decision: str, score: float) -> str:
 
 
 def suggestion_to_dict(suggestion, platform: str = "ODDSPORTAL") -> Dict[str, Any]:
-    """Convert a MappingSuggestion to the flat output format."""
+    """Convert a MappingSuggestion to the flat output format.
+
+    AUTO_MATCH results are auto-reviewed (is_checked=True, reason=AUTO_MAP)
+    so they don't require manual review in the admin panel.
+    """
     top = suggestion.candidates_top5[0] if suggestion.candidates_top5 else None
     score = top.score if top else 0.0
     gate = (
@@ -274,13 +278,14 @@ def suggestion_to_dict(suggestion, platform: str = "ODDSPORTAL") -> Dict[str, An
         if hasattr(suggestion.gate_decision, "value")
         else str(suggestion.gate_decision)
     )
+    is_auto = gate == "AUTO_MATCH"
 
     return {
         "platform": platform,
         "bet365_match": top.b365_match_id if top else None,
         "provider_id": suggestion.op_match_id,
         "confidence": round(score, 2),
-        "is_checked": False,
+        "is_checked": is_auto,
         "is_mapped": score >= CONFIDENCE_THRESHOLD and top is not None,
         "reason": _gate_to_reason(gate, score),
         "switch": top.swapped if top else False,

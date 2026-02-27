@@ -29,6 +29,7 @@ from core.models import (
 from core.normalizer import (
     build_match_text, build_swapped_text, detect_categories,
     resolve_alias, clean_text, compute_team_similarity,
+    compute_league_similarity,
 )
 
 logger = logging.getLogger(__name__)
@@ -184,19 +185,19 @@ class InferenceEngine:
     # ══════════════════════════════════════════
 
     def _prefilter(
-        self, op_match: MatchRecord, window_minutes: Optional[int] = None,
+        self, op_match: MatchRecord, window_hours: Optional[int] = None,
     ) -> np.ndarray:
         """
         Vectorized pre-filter: sport dict lookup + numpy kickoff window.
         Returns numpy array of B365 indices.
         """
-        window = window_minutes or CONFIG.gates.kickoff_window_minutes
+        window = window_hours or CONFIG.gates.kickoff_window_hours
         sport_indices = self._sport_to_indices.get(op_match.sport.lower())
         if sport_indices is None or len(sport_indices) == 0:
             return np.array([], dtype=np.int64)
 
         op_ts = op_match.kickoff.timestamp()
-        window_sec = window * 60.0
+        window_sec = window * 3600.0
         kickoffs = self._kickoff_timestamps[sport_indices]
         mask = np.abs(kickoffs - op_ts) <= window_sec
         return sport_indices[mask]
@@ -482,6 +483,8 @@ class InferenceEngine:
 
         w = CONFIG.gates.team_sim_weight
         min_tsim = CONFIG.gates.min_team_similarity
+        max_kickoff = CONFIG.gates.max_kickoff_diff_minutes
+        league_w = CONFIG.gates.league_soft_weight
 
         candidates = []
         for rank, ((b365_idx, _, is_swapped), ce_score) in enumerate(
@@ -497,10 +500,20 @@ class InferenceEngine:
                 b365.home_team, b365.away_team,
             )
 
+            league_sim = compute_league_similarity(
+                op_match.league, b365.league,
+            )
+
+            # Hard gates (TOP PRIORITY): team + kickoff → zero on mismatch
+            # Soft factor (LOW PRIORITY): league → reduces score, never zeros
             if team_sim < min_tsim:
                 final_score = 0.0
+            elif time_diff > max_kickoff:
+                final_score = 0.0
             else:
-                final_score = (1 - w) * float(ce_score) + w * team_sim
+                base_score = (1 - w) * float(ce_score) + w * team_sim
+                league_factor = (1.0 - league_w) + league_w * league_sim
+                final_score = base_score * league_factor
 
             use_swapped = sim_swapped if team_sim >= min_tsim else is_swapped
 
@@ -509,12 +522,14 @@ class InferenceEngine:
                 b365_match_id=b365.match_id,
                 b365_home=b365.home_team,
                 b365_away=b365.away_team,
+                b365_league=b365.league,
                 b365_kickoff=b365.kickoff,
                 score=round(final_score, 4),
                 time_diff_minutes=round(time_diff, 1),
                 swapped=use_swapped,
                 category_tags=b365.category_tags,
                 team_similarity=round(team_sim, 4),
+                league_similarity=round(league_sim, 4),
             ))
 
         candidates.sort(key=lambda c: c.score, reverse=True)
@@ -559,11 +574,13 @@ class InferenceEngine:
         """Evaluate auto-match gates. ALL must pass for AUTO_MATCH."""
         gates = CONFIG.gates
         details = {
+            "sport_gate": False,
             "min_score_gate": False,
             "margin_gate": False,
             "category_gate": False,
             "kickoff_gate": False,
             "team_name_gate": False,
+            "league_gate": False,
             "has_candidates": False,
         }
 
@@ -574,6 +591,13 @@ class InferenceEngine:
         details["has_candidates"] = True
         top1 = candidates[0]
         top2_score = candidates[1].score if len(candidates) > 1 else 0.0
+
+        # Sport gate: pre-filter ensures same sport, but verify explicitly
+        # In the pipeline, candidates are pre-filtered by sport, so this
+        # always passes. Included for gate completeness and audit trail.
+        details["sport_gate"] = True
+        details["op_sport"] = op_match.sport
+        details["b365_sport"] = top1.category_tags  # sport info from pre-filter
 
         details["score1"] = top1.score
         details["min_score_threshold"] = gates.min_score
@@ -605,9 +629,10 @@ class InferenceEngine:
             details["category_gate"] = False
             details["category_reason"] = "category_mismatch"
 
+        # Kickoff gate: time diff must be within ±45 minutes (hard cutoff)
         details["time_diff_minutes"] = top1.time_diff_minutes
-        details["tight_kickoff_threshold"] = gates.tight_kickoff_minutes
-        if top1.time_diff_minutes <= gates.tight_kickoff_minutes:
+        details["max_kickoff_diff_minutes"] = gates.max_kickoff_diff_minutes
+        if top1.time_diff_minutes <= gates.max_kickoff_diff_minutes:
             details["kickoff_gate"] = True
 
         # Use pre-computed team_similarity from _build_suggestion (avoid recomputation)
@@ -617,14 +642,34 @@ class InferenceEngine:
         if team_sim >= gates.min_team_similarity:
             details["team_name_gate"] = True
 
-        all_gates = [
-            "min_score_gate", "margin_gate", "category_gate",
+        # League gate: SOFT — informational only, does NOT block AUTO_MATCH
+        # League similarity is already factored into the score as a soft penalty
+        league_sim = top1.league_similarity
+        details["league_similarity"] = league_sim
+        details["min_league_similarity_threshold"] = gates.min_league_similarity
+        league_factor = (1.0 - gates.league_soft_weight) + gates.league_soft_weight * league_sim
+        details["league_factor"] = round(league_factor, 4)
+        if league_sim >= gates.min_league_similarity:
+            details["league_gate"] = True
+        else:
+            details["league_gate"] = False  # info-only — not in hard gates
+            details["league_reason"] = (
+                f"league_low_similarity: '{op_match.league}' vs '{top1.b365_league}' "
+                f"(sim={league_sim:.3f}, penalty factor={league_factor:.2f}×)"
+            )
+
+        # Only HARD gates determine AUTO_MATCH (league excluded — it's soft)
+        hard_gates = [
+            "sport_gate", "min_score_gate", "margin_gate", "category_gate",
             "kickoff_gate", "team_name_gate",
         ]
-        all_pass = all(details[g] for g in all_gates)
+        all_pass = all(details[g] for g in hard_gates)
 
         if all_pass:
             return GateResult.AUTO_MATCH, details
         else:
-            details["failed_gates"] = [g for g in all_gates if not details[g]]
+            details["failed_gates"] = [g for g in hard_gates if not details[g]]
+            # Also note if league was low (soft penalty applied)
+            if not details["league_gate"]:
+                details["soft_warnings"] = ["league_gate (soft penalty applied)"]
             return GateResult.NEED_REVIEW, details

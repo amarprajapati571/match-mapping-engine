@@ -78,8 +78,8 @@ class GateConfig:
     """Auto-match gate thresholds (all configurable)."""
     min_score: float = 0.90
     margin: float = 0.10
-    kickoff_window_minutes: int = 30
-    tight_kickoff_minutes: int = 15
+    kickoff_window_hours: int = 30
+    max_kickoff_diff_minutes: int = 45
 
     sensitive_categories: list = field(default_factory=lambda: [
         "WOMEN", "U23", "U21", "U20", "U19", "U18", "U17",
@@ -89,6 +89,12 @@ class GateConfig:
 
     min_team_similarity: float = 0.25
     team_sim_weight: float = 0.70
+
+    # League is LOW PRIORITY — soft factor, not a hard gate.
+    # league_soft_weight controls max penalty for complete league mismatch.
+    # E.g., 0.15 → perfect-team match with zero-league-match → 15% score reduction.
+    min_league_similarity: float = 0.60      # threshold for "info" gate (reporting only)
+    league_soft_weight: float = 0.15         # max penalty: 0.15 = 15% reduction
 
 
 @dataclass
@@ -182,6 +188,18 @@ class APIEndpoints:
         "STORE_RESULTS_URL",
         "https://sports-bet-api.allinsports.online/api/matches/store-ai-mapping",
     )
+    leagues_api_url: str = os.getenv(
+        "LEAGUES_API_URL",
+        "https://sports-bet-api.allinsports.online/api/leagues",
+    )
+    teams_api_url: str = os.getenv(
+        "TEAMS_API_URL",
+        "https://sports-bet-api.allinsports.online/api/teams",
+    )
+
+    # ── Local JSON file paths (used INSTEAD of API if set) ──
+    leagues_json_file: str = os.getenv("LEAGUES_JSON_FILE", "")
+    teams_json_file: str = os.getenv("TEAMS_JSON_FILE", "")
 
     enabled_providers: list = field(default_factory=lambda: [
         p.strip().upper()
@@ -243,12 +261,12 @@ class OutputConfig:
 
 @dataclass
 class SchedulerConfig:
-    """Scheduler settings — all configurable via environment variables."""
+    """Scheduler settings — runs fetch + inference only.
+    Training is separate — run via scripts/self_train_pipeline.py or POST /self-train.
+    """
     interval_minutes: int = int(os.getenv("SCHEDULER_INTERVAL_MINUTES", "45"))
     platform: str = os.getenv("SCHEDULER_PLATFORM", "ODDSPORTAL")
-    enable_training: bool = os.getenv("SCHEDULER_ENABLE_TRAINING", "true").lower() == "true"
     enable_inference: bool = os.getenv("SCHEDULER_ENABLE_INFERENCE", "true").lower() == "true"
-    use_local_feedback_api: bool = os.getenv("SCHEDULER_USE_LOCAL_FEEDBACK_API", "false").lower() == "true"
     max_retries_per_phase: int = int(os.getenv("SCHEDULER_MAX_RETRIES", "2"))
 
 

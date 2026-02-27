@@ -97,12 +97,14 @@ class Candidate(BaseModel):
     b365_match_id: str
     b365_home: str
     b365_away: str
+    b365_league: str = ""
     b365_kickoff: datetime
     score: float                     # Final reranked score (0-1)
     time_diff_minutes: float
     swapped: bool = False            # True if home/away were swapped to get best score
     category_tags: List[str] = []
     team_similarity: float = 0.0     # Pre-computed team name similarity (0-1)
+    league_similarity: float = 0.0   # Pre-computed league name similarity (0-1)
 
 
 class MappingSuggestion(BaseModel):

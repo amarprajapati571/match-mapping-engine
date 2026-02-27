@@ -2,14 +2,19 @@
 FastAPI Application — Production Inference API.
 
 Endpoints:
-1. POST /predict         → Top-5 candidates + gate decision
-2. POST /predict/batch   → Batch predictions
-3. POST /feedback        → Ingest human decisions
-4. POST /index/refresh   → Re-index B365 pool
-5. GET  /health          → Health check
-6. GET  /metrics         → Current feedback stats
-7. POST /evaluate        → Run offline evaluation
-8. POST /models/reload   → Hot-reload models (feature flag)
+1.  POST /predict         → Top-5 candidates + gate decision
+2.  POST /predict/batch   → Batch predictions
+3.  POST /feedback        → Ingest human decisions
+4.  POST /index/refresh   → Re-index B365 pool
+5.  GET  /health          → Health check
+6.  GET  /metrics         → Current feedback stats
+7.  POST /evaluate        → Run offline evaluation
+8.  POST /models/reload   → Hot-reload models (feature flag)
+9.  POST /compare         → Direct pairwise match comparison
+10. GET  /dashboard       → Match Compare Dashboard UI
+11. POST /reload-leagues  → Reload league aliases from JSON file or API
+12. POST /reload-teams    → Reload team aliases from JSON file or API
+13. POST /train-aliases   → Train models from league/team alias data
 """
 
 import asyncio
@@ -18,7 +23,9 @@ from datetime import datetime
 from typing import List, Optional
 from contextlib import asynccontextmanager
 
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from config.settings import CONFIG
@@ -28,7 +35,10 @@ from core.models import (
 )
 from core.inference import InferenceEngine
 from core.feedback import FeedbackStore, CSEFeedbackLoader
+from core.league_loader import load_league_aliases
+from core.team_loader import load_team_aliases
 from training.trainer import TrainingOrchestrator, DatasetBuilder
+from api.compare import CompareRequest, CompareResponse, compare_matches
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +51,28 @@ feedback_store: Optional[FeedbackStore] = None
 async def lifespan(app: FastAPI):
     """Initialize engine and stores on startup."""
     global engine, feedback_store
-    
+
     logger.info("Initializing Match Mapping Engine...")
     engine = InferenceEngine()
     feedback_store = FeedbackStore()
+
+    # Load dynamic aliases from API (non-blocking, graceful failure)
+    try:
+        added = load_league_aliases()
+        logger.info(f"Dynamic league aliases loaded: {added} new entries")
+    except Exception as e:
+        logger.warning(f"Failed to load league aliases (will use static): {e}")
+
+    try:
+        added = load_team_aliases()
+        logger.info(f"Dynamic team aliases loaded: {added} new entries")
+    except Exception as e:
+        logger.warning(f"Failed to load team aliases (will use static + acronym detection): {e}")
+
     logger.info("Engine ready. Awaiting B365 index (call POST /index/refresh).")
-    
+
     yield
-    
+
     logger.info("Shutting down...")
 
 
@@ -384,4 +408,205 @@ async def get_training_pairs(limit: int = 100, offset: int = 0):
     return {
         "total": len(pairs),
         "pairs": [p.model_dump() for p in pairs[offset:offset + limit]],
+    }
+
+
+# ═══════════════════════════════════════════════
+# Match Compare Dashboard
+# ═══════════════════════════════════════════════
+
+@app.post("/compare", response_model=CompareResponse)
+async def compare(request: CompareRequest):
+    """
+    Direct pairwise comparison between a provider match and a Bet365 match.
+    Returns detailed metrics: confidence, swap detection, gate evaluation, verdict.
+    Does NOT require the B365 pool to be indexed.
+    """
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Engine not initialized.")
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, compare_matches, request.provider_match, request.bet365_match, engine,
+    )
+    return result
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """Serve the Match Compare Dashboard UI."""
+    html_path = Path(__file__).resolve().parent.parent / "static" / "dashboard.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="Dashboard HTML not found.")
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"), status_code=200)
+
+
+class ReloadAliasRequest(BaseModel):
+    url: Optional[str] = None
+    file_path: Optional[str] = None
+
+
+@app.post("/reload-leagues")
+async def reload_leagues(request: ReloadAliasRequest = ReloadAliasRequest()):
+    """
+    Reload league aliases from JSON file or external API.
+
+    Priority:
+      1. file_path in request body → load from that JSON file
+      2. LEAGUES_JSON_FILE env var → load from configured JSON file
+      3. url in request body or LEAGUES_API_URL → fetch from API
+
+    No server restart needed.
+    """
+    loop = asyncio.get_event_loop()
+    added = await loop.run_in_executor(
+        None, load_league_aliases, request.url, request.file_path,
+    )
+    from core.normalizer import LEAGUE_ALIASES
+    return {
+        "status": "ok",
+        "source": "file" if request.file_path else ("api" if request.url else "auto"),
+        "new_aliases_added": added,
+        "total_aliases": len(LEAGUE_ALIASES),
+    }
+
+
+@app.post("/reload-teams")
+async def reload_teams(request: ReloadAliasRequest = ReloadAliasRequest()):
+    """
+    Reload team aliases from JSON file or external API.
+
+    Priority:
+      1. file_path in request body → load from that JSON file
+      2. TEAMS_JSON_FILE env var → load from configured JSON file
+      3. url in request body or TEAMS_API_URL → fetch from API
+
+    No server restart needed.
+    """
+    loop = asyncio.get_event_loop()
+    added = await loop.run_in_executor(
+        None, load_team_aliases, request.url, request.file_path,
+    )
+    from core.normalizer import TEAM_ALIASES
+    return {
+        "status": "ok",
+        "source": "file" if request.file_path else ("api" if request.url else "auto"),
+        "new_aliases_added": added,
+        "total_aliases": len(TEAM_ALIASES),
+    }
+
+
+# ═══════════════════════════════════════════════
+# Alias-Based Training
+# ═══════════════════════════════════════════════
+
+class TrainAliasesRequest(BaseModel):
+    leagues_file: str = "data/admin_leagues.json"
+    teams_file: str = "data/admin_teams.json"
+    max_league_variants: int = 5
+    max_team_variants: int = 3
+    hard_negatives: int = 0          # 0 = auto-balance with positives
+    sbert_only: bool = False
+    ce_only: bool = False
+    auto_reload: bool = True
+    dry_run: bool = False
+
+
+@app.post("/train-aliases")
+async def train_aliases(
+    request: TrainAliasesRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Train SBERT + Cross-Encoder from league/team alias data.
+
+    Generates synthetic training pairs from admin_leagues.json and admin_teams.json
+    so the ML models learn abbreviations, keywords, and name variations.
+
+    Runs in background — check /health for status after training completes.
+    """
+    from scripts.train_from_aliases import (
+        generate_league_pairs, generate_team_pairs, generate_hard_negatives,
+    )
+    from core.league_loader import load_leagues_from_file
+    from core.team_loader import load_teams_from_file
+
+    leagues = load_leagues_from_file(request.leagues_file)
+    teams = load_teams_from_file(request.teams_file)
+
+    if not leagues and not teams:
+        return {
+            "status": "error",
+            "message": "No league or team data found. Check file paths.",
+        }
+
+    league_pairs = generate_league_pairs(
+        leagues, max_pairs_per_league=request.max_league_variants,
+    )
+    team_pairs = generate_team_pairs(
+        teams, max_pairs_per_team=request.max_team_variants,
+    )
+
+    total_positives = len(league_pairs) + len(team_pairs)
+    n_negatives = request.hard_negatives if request.hard_negatives > 0 else total_positives
+
+    neg_pairs = generate_hard_negatives(teams, n_negatives=n_negatives)
+
+    all_pairs = league_pairs + team_pairs + neg_pairs
+
+    if request.dry_run:
+        return {
+            "status": "dry_run",
+            "leagues": len(leagues),
+            "teams": len(teams),
+            "league_pairs": len(league_pairs),
+            "team_pairs": len(team_pairs),
+            "hard_negatives": len(neg_pairs),
+            "total_pairs": len(all_pairs),
+        }
+
+    if not DatasetBuilder.validate_no_contamination(all_pairs):
+        return {"status": "error", "message": "Label contamination detected."}
+
+    def _run_training():
+        import os
+        from datetime import datetime as dt
+
+        ts = dt.utcnow().strftime("%Y%m%d_%H%M%S")
+        os.makedirs("models", exist_ok=True)
+        sbert_out = f"models/sbert_alias_tuned_{ts}"
+        ce_out = f"models/ce_alias_tuned_{ts}"
+
+        orchestrator = TrainingOrchestrator(all_pairs)
+        orchestrator.prepare()
+
+        if request.ce_only:
+            orchestrator.train_cross_encoder(ce_out)
+        elif request.sbert_only:
+            orchestrator.train_sbert(sbert_out)
+        else:
+            orchestrator.train_all(sbert_out, ce_out)
+
+        if request.auto_reload and engine:
+            if not request.ce_only:
+                CONFIG.model.tuned_sbert_path = sbert_out
+                CONFIG.model.use_tuned_sbert = True
+            if not request.sbert_only:
+                CONFIG.model.tuned_cross_encoder_path = ce_out
+                CONFIG.model.use_tuned_cross_encoder = True
+            engine.reload_models()
+            logger.info("Models auto-reloaded after alias training.")
+
+    background_tasks.add_task(_run_training)
+
+    return {
+        "status": "training_started",
+        "message": "Alias-based training started in background.",
+        "leagues": len(leagues),
+        "teams": len(teams),
+        "league_pairs": len(league_pairs),
+        "team_pairs": len(team_pairs),
+        "hard_negatives": len(neg_pairs),
+        "total_pairs": len(all_pairs),
+        "auto_reload": request.auto_reload,
     }

@@ -1,0 +1,62 @@
+[
+  {
+    "league_name_en": "Premier League",
+    "country_en": "England",
+    "league_abbreviation": "EPL",
+    "keywords": ["English Premier League", "EPL", "Barclays Premier League"]
+  },
+  {
+    "league_name_en": "La Liga",
+    "country_en": "Spain",
+    "league_abbreviation": "LL",
+    "keywords": ["Spanish La Liga", "LaLiga Santander", "Primera Division"]
+  },
+  {
+    "league_name_en": "Bundesliga",
+    "country_en": "Germany",
+    "league_abbreviation": "BL",
+    "keywords": ["German Bundesliga", "1. Bundesliga"]
+  },
+  {
+    "league_name_en": "Serie A",
+    "country_en": "Italy",
+    "league_abbreviation": "SA",
+    "keywords": ["Italian Serie A", "Serie A TIM"]
+  },
+  {
+    "league_name_en": "Ligue 1",
+    "country_en": "France",
+    "league_abbreviation": "L1",
+    "keywords": ["French Ligue 1", "Ligue 1 Uber Eats"]
+  },
+  {
+    "league_name_en": "Champions League",
+    "country_en": "Europe",
+    "league_abbreviation": "UCL",
+    "keywords": ["UEFA Champions League", "CL", "Champions League"]
+  },
+  {
+    "league_name_en": "Indian Premier League",
+    "country_en": "India",
+    "league_abbreviation": "IPL",
+    "keywords": ["IPL", "TATA IPL", "Indian Premier League Cricket"]
+  },
+  {
+    "league_name_en": "J2 League",
+    "country_en": "Japan",
+    "league_abbreviation": "J2",
+    "keywords": ["JAPAN J2 LEAGUE", "Japan J2-League", "J2 League Japan"]
+  },
+  {
+    "league_name_en": "NBA",
+    "country_en": "USA",
+    "league_abbreviation": "NBA",
+    "keywords": ["National Basketball Association", "NBA Basketball"]
+  },
+  {
+    "league_name_en": "ATP Tour",
+    "country_en": "World",
+    "league_abbreviation": "ATP",
+    "keywords": ["ATP Tennis", "ATP Tour", "Association of Tennis Professionals"]
+  }
+]
