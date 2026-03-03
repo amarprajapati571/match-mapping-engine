@@ -442,11 +442,30 @@ class CSEFeedbackLoader:
         session = cls._build_session()
         all_rows: List[dict] = []
         page = 1
+        visited_pages = set()
 
         logger.info(f"Fetching CSE feedback from {api_url} (platform={platform})...")
 
         while True:
-            params = {"platform": platform, "page": page, "limit": 100}
+            if page in visited_pages:
+                logger.warning(
+                    f"Detected repeated feedback page={page}. Stopping to avoid pagination loop."
+                )
+                break
+            visited_pages.add(page)
+
+            if len(visited_pages) > CONFIG.feedback_api.max_pages:
+                logger.warning(
+                    f"Reached FEEDBACK_API_MAX_PAGES={CONFIG.feedback_api.max_pages}. "
+                    f"Stopping pagination early."
+                )
+                break
+
+            params = {
+                "platform": platform,
+                "page": page,
+                "limit": CONFIG.feedback_api.page_size,
+            }
             try:
                 resp = session.get(
                     api_url, params=params,
@@ -467,9 +486,11 @@ class CSEFeedbackLoader:
             if isinstance(data, list):
                 rows = data
                 total_pages = 1
+                next_page = None
             else:
                 rows = data.get("rows", data.get("data", []))
                 total_pages = data.get("totalPages", 1)
+                next_page = data.get("nextPage")
 
             if not rows:
                 break
@@ -479,6 +500,10 @@ class CSEFeedbackLoader:
                 f"  Page {page}/{total_pages} — "
                 f"fetched {len(rows)} feedback rows (total: {len(all_rows)})"
             )
+
+            if next_page is not None:
+                page = next_page
+                continue
 
             if page >= total_pages:
                 break
@@ -496,6 +521,42 @@ class CSEFeedbackLoader:
                 or league_val.get("league_name_en", "")
             )
         return str(league_val) if league_val else ""
+
+    @staticmethod
+    def _extract_feedback_from_logs(row: dict) -> Optional[str]:
+        """
+        Extract latest reviewer decision from logs.
+        Falls back to last logs entry when timestamps are missing/invalid.
+        """
+        logs = row.get("logs")
+        if not isinstance(logs, list) or not logs:
+            return None
+
+        valid_logs = [entry for entry in logs if isinstance(entry, dict)]
+        if not valid_logs:
+            return None
+
+        def _log_sort_key(entry: dict) -> str:
+            # ISO timestamps sort lexicographically; missing timestamps sink to the bottom.
+            return str(entry.get("when") or "")
+
+        latest_entry = max(valid_logs, key=_log_sort_key)
+        what = latest_entry.get("what")
+        return str(what).strip() if what else None
+
+    @classmethod
+    def _extract_feedback_value(cls, row: dict) -> str:
+        """
+        Training signal source priority:
+        1) latest logs[].what from CSE review history
+        2) root feedback/cse_feedback fallback for backward compatibility
+        """
+        from_logs = cls._extract_feedback_from_logs(row)
+        if from_logs:
+            return from_logs
+
+        fallback = row.get("feedback", row.get("cse_feedback", ""))
+        return str(fallback).strip() if fallback else ""
 
     @classmethod
     def _extract_provider_fields(cls, row: dict) -> dict:
@@ -586,7 +647,7 @@ class CSEFeedbackLoader:
 
         for i, row in enumerate(feedback_rows):
             try:
-                feedback_val = row.get("feedback", row.get("cse_feedback", ""))
+                feedback_val = cls._extract_feedback_value(row)
                 if not feedback_val:
                     counts["errors"] += 1
                     continue
@@ -598,8 +659,11 @@ class CSEFeedbackLoader:
                     LOOSE_MAP = {
                         "correct": CSEFeedback.CORRECT,
                         "not sure": CSEFeedback.NOT_SURE,
+                        "not_sure": CSEFeedback.NOT_SURE,
                         "not correct": CSEFeedback.NOT_CORRECT,
+                        "notcorrect": CSEFeedback.NOT_CORRECT,
                         "need to swap": CSEFeedback.NEED_TO_SWAP,
+                        "need_to_swap": CSEFeedback.NEED_TO_SWAP,
                         "swap": CSEFeedback.NEED_TO_SWAP,
                         "wrong": CSEFeedback.NOT_CORRECT,
                     }
