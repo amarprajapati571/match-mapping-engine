@@ -42,7 +42,7 @@ from core.models import TrainingPair
 from config.settings import CONFIG
 from evaluation.accuracy_tracker import (
     AccuracyEntry, AccuracyTracker, ComparisonReport,
-    TestSetScorer, get_current_model_paths,
+    TestSetScorer, get_current_model_paths, post_training_health_check,
 )
 
 logger = logging.getLogger(__name__)
@@ -880,6 +880,16 @@ class TrainingOrchestrator:
 
             tracker = AccuracyTracker()
             tracker.record(entry)
+
+            # Run health check on post-training entries
+            if run_type == "post_training":
+                alerts = post_training_health_check(entry)
+                if alerts:
+                    logger.warning(
+                        f"Post-training health check found {len(alerts)} issue(s) "
+                        f"for {run_id}"
+                    )
+
             return entry
 
         except Exception as exc:

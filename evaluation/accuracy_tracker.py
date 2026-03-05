@@ -565,6 +565,93 @@ def _regressed(before: dict, after: dict, key: str, higher_better: bool) -> bool
 
 
 # ═══════════════════════════════════════════════
+# Post-Training Health Check
+# ═══════════════════════════════════════════════
+
+def post_training_health_check(entry: AccuracyEntry) -> List[str]:
+    """
+    Run after every training to catch issues early.
+
+    Checks for:
+    - Single-class data (0 positives or 0 negatives)
+    - Null key metrics (AUC-ROC, score gap)
+    - Accuracy regression below threshold
+    - Score gap too low for production use
+    - Suspiciously perfect metrics (overfitting)
+
+    Returns list of alert strings (empty = all healthy).
+    """
+    alerts = []
+    dataset = entry.dataset_info or {}
+    ce = entry.ce_metrics or {}
+    sbert = entry.sbert_metrics or {}
+    run_id = entry.training_run_id
+
+    # ── Check 1: Single class ──
+    total_pos = dataset.get("total_positives", 0)
+    total_neg = dataset.get("total_negatives", 0)
+    if total_pos == 0:
+        alerts.append(
+            f"[{run_id}] CRITICAL: 0 positives in training data. "
+            f"Model cannot learn what a correct match looks like."
+        )
+    if total_neg == 0:
+        alerts.append(
+            f"[{run_id}] CRITICAL: 0 negatives in training data. "
+            f"Model cannot learn what an incorrect match looks like."
+        )
+
+    # ── Check 2: Key metrics are null ──
+    if ce.get("auc_roc") is None:
+        alerts.append(
+            f"[{run_id}] WARNING: AUC-ROC is null (likely single-class test set)"
+        )
+    if ce.get("score_gap") is None:
+        alerts.append(
+            f"[{run_id}] WARNING: CE score gap is null (likely single-class test set)"
+        )
+    if sbert.get("similarity_gap") is None:
+        alerts.append(
+            f"[{run_id}] WARNING: SBERT similarity gap is null"
+        )
+
+    # ── Check 3: Accuracy below threshold ──
+    accuracy = ce.get("accuracy")
+    if accuracy is not None and accuracy < 0.90:
+        alerts.append(
+            f"[{run_id}] WARNING: CE accuracy {accuracy:.2%} is below 90% threshold"
+        )
+
+    # ── Check 4: Score gap too low ──
+    score_gap = ce.get("score_gap")
+    if score_gap is not None and score_gap < 0.70:
+        alerts.append(
+            f"[{run_id}] WARNING: CE score gap {score_gap:.3f} is below 0.70 — "
+            f"weak separation between matches and non-matches"
+        )
+
+    # ── Check 5: Suspiciously perfect (overfitting) ──
+    auc = ce.get("auc_roc")
+    if auc is not None and auc >= 1.0:
+        alerts.append(
+            f"[{run_id}] WARNING: AUC-ROC is exactly 1.0 — "
+            f"check for overfitting or data leakage"
+        )
+
+    # ── Log results ──
+    if alerts:
+        for alert in alerts:
+            logger.warning(f"HEALTH CHECK: {alert}")
+    else:
+        logger.info(
+            f"[{run_id}] Health check passed: "
+            f"accuracy={accuracy}, auc={auc}, score_gap={score_gap}"
+        )
+
+    return alerts
+
+
+# ═══════════════════════════════════════════════
 # Convenience: resolve current model paths
 # ═══════════════════════════════════════════════
 
