@@ -177,6 +177,8 @@ def main():
     print(f"    No feedback value:          {feedback_counts.get('no_feedback_value', 'N/A')}")
     print(f"    Unknown feedback values:    {feedback_counts.get('unknown_feedback_value', 'N/A')}")
     print(f"    Errors:                     {feedback_counts['errors']}")
+    if feedback_counts.get("contamination_resolved"):
+        print(f"    Contamination resolved:     {feedback_counts['contamination_resolved']} (duplicate pairs removed)")
     print(f"    Total training pairs:       {n_pairs}")
 
     # Show where the unaccounted rows went

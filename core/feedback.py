@@ -246,6 +246,54 @@ class FeedbackStore:
             counts[fb.decision.value] += 1
         return dict(counts)
     
+    def deduplicate_conflicting_pairs(self) -> int:
+        """
+        Resolve label contamination where the same (anchor, candidate) text
+        appears as BOTH a positive and a negative pair.
+
+        This happens when different reviewers give conflicting feedback for
+        the same match pair, or when a match is first marked 'Not correct'
+        and later 'Mapping Completed' (or vice versa).
+
+        Resolution strategy: positive (Correct/Mapping Completed) wins over
+        negative, because 'Mapping Completed' is a confirmed final state.
+        The negative duplicate is removed.
+
+        Returns:
+            Number of contaminated pairs removed.
+        """
+        # Build set of positive pair keys
+        positive_keys = set()
+        for p in self._positives:
+            positive_keys.add((p.anchor_text, p.candidate_text))
+
+        if not positive_keys:
+            return 0
+
+        # Find negatives that conflict with positives
+        contaminated = []
+        for i, p in enumerate(self._training_pairs):
+            if p.label == 0.0 and (p.anchor_text, p.candidate_text) in positive_keys:
+                contaminated.append(i)
+
+        if not contaminated:
+            return 0
+
+        # Remove contaminated pairs (iterate in reverse to preserve indices)
+        for i in reversed(contaminated):
+            self._training_pairs.pop(i)
+
+        # Rebuild hard_negatives index
+        self._hard_negatives = [
+            p for p in self._training_pairs if p.is_hard_negative
+        ]
+
+        logger.info(
+            f"Deduplication: removed {len(contaminated)} conflicting negative pairs "
+            f"that also appeared as positives (positive label wins)"
+        )
+        return len(contaminated)
+
     def get_all_feedbacks(self) -> List[FeedbackRecord]:
         """Return all feedback records."""
         return list(self._feedbacks.values())
@@ -421,13 +469,61 @@ class CSEFeedbackLoader:
         return session
 
     @classmethod
+    def _fetch_page(
+        cls,
+        api_url: str,
+        platform: str,
+        page: int,
+        session: requests.Session = None,
+    ) -> Tuple[int, List[dict], Optional[int]]:
+        """
+        Fetch a single page of feedback from the API.
+
+        Returns:
+            (page_number, rows, total_pages)
+            total_pages is None if it couldn't be determined.
+        """
+        _session = session or cls._build_session()
+        params = {
+            "platform": platform,
+            "page": page,
+            "limit": CONFIG.feedback_api.page_size,
+        }
+        try:
+            resp = _session.get(
+                api_url, params=params,
+                timeout=CONFIG.feedback_api.request_timeout,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.error(f"Failed to fetch feedback page {page}: {e}")
+            return page, [], None
+
+        body = resp.json()
+
+        if not body.get("status"):
+            logger.error(f"Feedback API error on page {page}: {body.get('message')}")
+            return page, [], None
+
+        data = body.get("data", {})
+        if isinstance(data, list):
+            return page, data, 1
+        else:
+            rows = data.get("rows", data.get("data", []))
+            total_pages = data.get("totalPages", 1)
+            return page, rows, total_pages
+
+    @classmethod
     def fetch_feedback(
         cls,
         platform: str = None,
         url: str = None,
     ) -> List[dict]:
         """
-        Fetch all CSE feedback rows from the remote API.
+        Fetch all CSE feedback rows from the remote API using parallel requests.
+
+        Phase 1: Fetch page 1 sequentially to discover totalPages.
+        Phase 2: Fetch remaining pages in parallel using ThreadPoolExecutor.
 
         Args:
             platform: Platform filter (default: CONFIG.feedback_api.default_platform)
@@ -436,80 +532,91 @@ class CSEFeedbackLoader:
         Returns:
             List of raw feedback dicts from the API.
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time as _time
+
         platform = platform or CONFIG.feedback_api.default_platform
         api_url = url or CONFIG.feedback_api.url
-
-        session = cls._build_session()
-        all_rows: List[dict] = []
-        page = 1
-        visited_pages = set()
+        max_workers = CONFIG.feedback_api.max_parallel_workers
 
         logger.info(f"Fetching CSE feedback from {api_url} (platform={platform})...")
+        t_start = _time.monotonic()
 
-        while True:
-            if page in visited_pages:
-                logger.warning(
-                    f"Detected repeated feedback page={page}. Stopping to avoid pagination loop."
+        # ── Phase 1: Fetch page 1 to discover totalPages ──
+        session = cls._build_session()
+        page_num, first_rows, total_pages = cls._fetch_page(
+            api_url, platform, page=1, session=session,
+        )
+        if not first_rows:
+            logger.warning("Page 1 returned no rows. Nothing to fetch.")
+            return []
+
+        total_pages = total_pages or 1
+        total_pages = min(total_pages, CONFIG.feedback_api.max_pages)
+
+        logger.info(
+            f"  Page 1/{total_pages} — fetched {len(first_rows)} rows. "
+            f"Fetching remaining {total_pages - 1} pages with {max_workers} workers..."
+        )
+
+        # ── Phase 2: Fetch remaining pages in parallel ──
+        # Use dict keyed by page number to maintain order
+        results_by_page: Dict[int, List[dict]] = {1: first_rows}
+
+        if total_pages > 1:
+            remaining_pages = list(range(2, total_pages + 1))
+
+            def _worker(pg: int) -> Tuple[int, List[dict]]:
+                """Fetch one page with its own session for thread safety."""
+                worker_session = cls._build_session()
+                _, rows, _ = cls._fetch_page(
+                    api_url, platform, page=pg, session=worker_session,
                 )
-                break
-            visited_pages.add(page)
+                return pg, rows
 
-            if len(visited_pages) > CONFIG.feedback_api.max_pages:
-                logger.warning(
-                    f"Reached FEEDBACK_API_MAX_PAGES={CONFIG.feedback_api.max_pages}. "
-                    f"Stopping pagination early."
-                )
-                break
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_worker, pg): pg
+                    for pg in remaining_pages
+                }
 
-            params = {
-                "platform": platform,
-                "page": page,
-                "limit": CONFIG.feedback_api.page_size,
-            }
-            try:
-                resp = session.get(
-                    api_url, params=params,
-                    timeout=CONFIG.feedback_api.request_timeout,
-                )
-                resp.raise_for_status()
-            except requests.RequestException as e:
-                logger.error(f"Failed to fetch feedback page {page}: {e}")
-                break
+                completed = 0
+                failed = 0
+                for future in as_completed(futures):
+                    pg = futures[future]
+                    try:
+                        page_num, rows = future.result()
+                        if rows:
+                            results_by_page[page_num] = rows
+                        else:
+                            failed += 1
+                        completed += 1
+                        # Log progress every 20 pages
+                        if completed % 20 == 0 or completed == len(remaining_pages):
+                            fetched_so_far = sum(len(r) for r in results_by_page.values())
+                            logger.info(
+                                f"  Progress: {completed}/{len(remaining_pages)} pages "
+                                f"({fetched_so_far} rows, {failed} failed)"
+                            )
+                    except Exception as e:
+                        failed += 1
+                        completed += 1
+                        logger.error(f"  Page {pg} raised exception: {e}")
 
-            body = resp.json()
+                if failed > 0:
+                    logger.warning(f"  {failed}/{len(remaining_pages)} pages failed to fetch")
 
-            if not body.get("status"):
-                logger.error(f"Feedback API error: {body.get('message')}")
-                break
+        # ── Combine results in page order ──
+        all_rows: List[dict] = []
+        for pg in sorted(results_by_page.keys()):
+            all_rows.extend(results_by_page[pg])
 
-            data = body.get("data", {})
-            if isinstance(data, list):
-                rows = data
-                total_pages = 1
-                next_page = None
-            else:
-                rows = data.get("rows", data.get("data", []))
-                total_pages = data.get("totalPages", 1)
-                next_page = data.get("nextPage")
-
-            if not rows:
-                break
-
-            all_rows.extend(rows)
-            logger.info(
-                f"  Page {page}/{total_pages} — "
-                f"fetched {len(rows)} feedback rows (total: {len(all_rows)})"
-            )
-
-            if next_page is not None:
-                page = next_page
-                continue
-
-            if page >= total_pages:
-                break
-            page += 1
-
-        logger.info(f"Fetched {len(all_rows)} total CSE feedback rows")
+        elapsed = _time.monotonic() - t_start
+        logger.info(
+            f"Fetched {len(all_rows)} total CSE feedback rows "
+            f"from {len(results_by_page)} pages in {elapsed:.1f}s "
+            f"(was ~{total_pages * 5.5:.0f}s sequential)"
+        )
         return all_rows
 
     @staticmethod
@@ -814,6 +921,12 @@ class CSEFeedbackLoader:
                 logger.warning(f"Failed to process CSE feedback row {i}: {e}")
                 counts["errors"] += 1
                 continue
+
+        # ── Deduplicate conflicting pairs (same pair as both pos + neg) ──
+        removed = store.deduplicate_conflicting_pairs()
+        if removed > 0:
+            total_pairs -= removed
+            counts["contamination_resolved"] = removed
 
         # Log unknown feedback values for diagnostics
         if unknown_values:

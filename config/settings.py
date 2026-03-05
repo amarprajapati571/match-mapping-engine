@@ -143,6 +143,8 @@ class FeedbackAPIConfig:
     page_size: int = int(os.getenv("FEEDBACK_API_PAGE_SIZE", "100"))
     max_pages: int = int(os.getenv("FEEDBACK_API_MAX_PAGES", "10000"))
 
+    max_parallel_workers: int = int(os.getenv("FEEDBACK_API_MAX_WORKERS", "10"))
+
     min_feedback_for_training: int = int(os.getenv("MIN_FEEDBACK_FOR_TRAINING", "50"))
     auto_reload_after_training: bool = os.getenv("AUTO_RELOAD_AFTER_TRAINING", "true").lower() == "true"
 
