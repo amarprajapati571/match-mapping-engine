@@ -169,12 +169,29 @@ def main():
     )
 
     print(f"\n  Feedback breakdown:")
-    print(f"    Correct (→ positive):     {feedback_counts['correct']}")
-    print(f"    Not correct (→ negative): {feedback_counts['not_correct']}")
-    print(f"    Need to swap (→ swap):    {feedback_counts['need_to_swap']}")
-    print(f"    Not Sure (skipped):       {feedback_counts['not_sure_skipped']}")
-    print(f"    Errors:                   {feedback_counts['errors']}")
-    print(f"    Total training pairs:     {n_pairs}")
+    print(f"    Correct (→ positive):       {feedback_counts['correct']}")
+    print(f"    Not correct (→ negative):   {feedback_counts['not_correct']}")
+    print(f"    Need to swap (→ swap):      {feedback_counts['need_to_swap']}")
+    print(f"    Not Sure (skipped):         {feedback_counts['not_sure_skipped']}")
+    print(f"    No B365 data (skipped):     {feedback_counts.get('no_b365_skipped', 'N/A')}")
+    print(f"    No feedback value:          {feedback_counts.get('no_feedback_value', 'N/A')}")
+    print(f"    Unknown feedback values:    {feedback_counts.get('unknown_feedback_value', 'N/A')}")
+    print(f"    Errors:                     {feedback_counts['errors']}")
+    print(f"    Total training pairs:       {n_pairs}")
+
+    # Show where the unaccounted rows went
+    accounted = (
+        feedback_counts["correct"] + feedback_counts["not_correct"]
+        + feedback_counts["need_to_swap"] + feedback_counts["not_sure_skipped"]
+        + feedback_counts.get("no_b365_skipped", 0)
+        + feedback_counts.get("no_feedback_value", 0)
+        + feedback_counts.get("unknown_feedback_value", 0)
+        + feedback_counts["errors"]
+    )
+    unaccounted = len(feedback_rows) - accounted
+    if unaccounted > 0:
+        print(f"    Unaccounted rows:           {unaccounted}")
+    print(f"    Total rows from API:        {len(feedback_rows)}")
 
     all_pairs = store.get_training_pairs()
     positives = store.get_positives()
@@ -186,9 +203,9 @@ def main():
     print(f"    Hard negatives:  {len(negatives)}")
 
     if not positives and negatives:
-        print("\n  WARNING: Only NEGATIVE examples found (no 'Correct' feedback).")
-        print("  The system will attempt to load cached positives from training_pairs.json")
-        print("  or generate synthetic data to enable proper two-class training.")
+        print("\n  !! SINGLE-CLASS ALERT: Only NEGATIVE examples found (0 positives).")
+        print("  This has been happening since Feb 23 — likely a feedback API issue.")
+        print("  The system will attempt to load cached positives or generate synthetic data.")
     elif positives and not negatives:
         print("\n  WARNING: Only POSITIVE examples found (no 'Not correct' feedback).")
         print("  Hard negatives will be generated automatically by shuffling candidates.")
@@ -210,6 +227,48 @@ def main():
         )
         print("  Use --min-feedback to override this threshold.")
         return
+
+    # ── Validation Gate: Block single-class training ──
+    if len(positives) == 0 and len(negatives) > 0:
+        print("\n" + "!" * 70)
+        print("  TRAINING BLOCKED — Zero positive examples detected!")
+        print("!" * 70)
+        print(f"""
+  The CSE feedback contains {len(negatives)} negatives but 0 positives.
+  Training on single-class data produces a useless model that always
+  predicts 'no match'. This wastes compute and disk space.
+
+  Diagnostics:
+    Total feedback rows:    {len(feedback_rows)}
+    Correct (→ positive):   {feedback_counts['correct']}
+    Not correct (→ neg):    {feedback_counts['not_correct']}
+    Need to swap:           {feedback_counts['need_to_swap']}
+    Not Sure (skipped):     {feedback_counts['not_sure_skipped']}
+    No B365 data (skipped): {feedback_counts.get('no_b365_skipped', 'N/A')}
+    Errors:                 {feedback_counts['errors']}
+
+  Possible causes:
+    1. CSE team is not marking any matches as 'Correct' in the feedback UI
+    2. The feedback API is not returning 'Correct' entries (query/filter bug)
+    3. The feedback value extraction is not recognizing the 'Correct' format
+
+  To investigate:
+    - Run with --dry-run to inspect feedback data without training
+    - Check a feedback snapshot: data/cse_feedback_*.json
+    - Verify the CSE feedback API returns rows with 'Correct' status
+
+  To override (NOT recommended):
+    - Use --include-existing with a labeled_records.json containing positives
+""")
+        logger.error(
+            f"TRAINING BLOCKED: 0 positives, {len(negatives)} negatives. "
+            f"Feedback counts: {feedback_counts}"
+        )
+        return
+
+    if len(negatives) == 0 and len(positives) > 0:
+        print("\n  WARNING: No negatives found. Synthetic hard negatives will be generated.")
+        print("  Training will proceed but may not be optimal.")
 
     # ── Step 3: Validate ──
     print("\nStep 3: Validating training data...")

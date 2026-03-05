@@ -472,6 +472,23 @@ def _format_metric_section(
 
 def _compute_verdict(before: AccuracyEntry, after: AccuracyEntry) -> Tuple[str, List[str]]:
     """Determine if the model improved, regressed, or is mixed."""
+
+    # Check if both classes exist in the test set — single-class evaluation is invalid
+    ds_info = after.dataset_info
+    test_pos = ds_info.get("test_positives", 0)
+    test_neg = ds_info.get("test_negatives", 0)
+    if test_pos == 0 or test_neg == 0:
+        details = [
+            f"Test set has {test_pos} positives and {test_neg} negatives.",
+            "Both classes are required for meaningful evaluation.",
+            "Metrics like AUC-ROC, score gap, and similarity gap are invalid",
+            "with only one class. This model should NOT be deployed.",
+            "",
+            "Fix: Ensure CSE feedback includes both 'Correct' and 'Not correct'",
+            "entries before running self-training.",
+        ]
+        return "INVALID - SINGLE CLASS", details
+
     improvements = []
     regressions = []
 

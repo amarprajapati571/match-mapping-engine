@@ -525,8 +525,20 @@ class CSEFeedbackLoader:
     @staticmethod
     def _extract_feedback_from_logs(row: dict) -> Optional[str]:
         """
-        Extract latest reviewer decision from logs.
-        Falls back to last logs entry when timestamps are missing/invalid.
+        Extract the effective reviewer decision from logs.
+
+        Log entries like "Mapping Completed" or "Team Switched" are
+        status transitions, not review decisions.  When the latest entry
+        is a status transition we walk backwards through the sorted logs
+        to find the most recent *review decision* and then combine it
+        with the status to determine the correct training signal.
+
+        Decision hierarchy (latest timestamp wins):
+          - "Mapping Completed" → the mapping was confirmed correct
+            UNLESS an earlier decision was "Not correct" and there is
+            no subsequent corrective action.  In practice, if a mapping
+            is completed it means a reviewer confirmed it.
+          - "Not correct", "Not Sure", "Need to swap", "Correct" → direct decisions
         """
         logs = row.get("logs")
         if not isinstance(logs, list) or not logs:
@@ -537,23 +549,57 @@ class CSEFeedbackLoader:
             return None
 
         def _log_sort_key(entry: dict) -> str:
-            # ISO timestamps sort lexicographically; missing timestamps sink to the bottom.
             return str(entry.get("when") or "")
 
-        latest_entry = max(valid_logs, key=_log_sort_key)
-        what = latest_entry.get("what")
-        return str(what).strip() if what else None
+        sorted_logs = sorted(valid_logs, key=_log_sort_key)
+        latest_entry = sorted_logs[-1]
+        latest_what = str(latest_entry.get("what", "")).strip()
+
+        # Status transitions that indicate a final confirmed state
+        STATUS_TRANSITIONS = {
+            "Mapping Completed",
+            "mapping completed",
+            "Mapped",
+            "mapped",
+        }
+
+        SWAP_TRANSITIONS = {
+            "Team Switched",
+            "team switched",
+            "Switch Completed",
+            "switch completed",
+            "Teams Swapped",
+        }
+
+        if latest_what in STATUS_TRANSITIONS:
+            # "Mapping Completed" means the match was confirmed as correct.
+            # Check is_team_switched_completed to see if it was a swap.
+            if row.get("is_team_switched_completed"):
+                return "Need to swap"
+            return "Correct"
+
+        if latest_what in SWAP_TRANSITIONS:
+            return "Need to swap"
+
+        return latest_what if latest_what else None
 
     @classmethod
     def _extract_feedback_value(cls, row: dict) -> str:
         """
         Training signal source priority:
-        1) latest logs[].what from CSE review history
-        2) root feedback/cse_feedback fallback for backward compatibility
+        1) latest logs[].what from CSE review history (with status transition handling)
+        2) row-level status fields (is_mapped_completed, is_team_switched_completed)
+        3) root feedback/cse_feedback fallback for backward compatibility
         """
         from_logs = cls._extract_feedback_from_logs(row)
         if from_logs:
             return from_logs
+
+        # Fallback: use structured status fields
+        if row.get("is_mapped_completed"):
+            if row.get("is_team_switched_completed"):
+                return "Need to swap"
+            return "Correct"
 
         fallback = row.get("feedback", row.get("cse_feedback", ""))
         return str(fallback).strip() if fallback else ""
@@ -642,14 +688,18 @@ class CSEFeedbackLoader:
             "need_to_swap": 0,
             "not_sure_skipped": 0,
             "no_b365_skipped": 0,
+            "no_feedback_value": 0,
+            "unknown_feedback_value": 0,
             "errors": 0,
         }
+        # Track unique unknown feedback values for diagnostics
+        unknown_values: Dict[str, int] = {}
 
         for i, row in enumerate(feedback_rows):
             try:
                 feedback_val = cls._extract_feedback_value(row)
                 if not feedback_val:
-                    counts["errors"] += 1
+                    counts["no_feedback_value"] += 1
                     continue
 
                 try:
@@ -662,17 +712,26 @@ class CSEFeedbackLoader:
                         "not_sure": CSEFeedback.NOT_SURE,
                         "not correct": CSEFeedback.NOT_CORRECT,
                         "notcorrect": CSEFeedback.NOT_CORRECT,
+                        "not_correct": CSEFeedback.NOT_CORRECT,
                         "need to swap": CSEFeedback.NEED_TO_SWAP,
                         "need_to_swap": CSEFeedback.NEED_TO_SWAP,
                         "swap": CSEFeedback.NEED_TO_SWAP,
                         "wrong": CSEFeedback.NOT_CORRECT,
+                        # Status transitions from CSE review workflow
+                        "mapping completed": CSEFeedback.CORRECT,
+                        "mapped": CSEFeedback.CORRECT,
+                        "team switched": CSEFeedback.NEED_TO_SWAP,
+                        "switch completed": CSEFeedback.NEED_TO_SWAP,
+                        "teams swapped": CSEFeedback.NEED_TO_SWAP,
                     }
                     cse_feedback = LOOSE_MAP.get(feedback_lower)
                     if cse_feedback is None:
-                        logger.warning(
-                            f"Row {i}: Unknown feedback value '{feedback_val}', skipping"
-                        )
-                        counts["errors"] += 1
+                        unknown_values[feedback_val] = unknown_values.get(feedback_val, 0) + 1
+                        counts["unknown_feedback_value"] += 1
+                        if len(unknown_values) <= 20:
+                            logger.warning(
+                                f"Row {i}: Unknown feedback value '{feedback_val}', skipping"
+                            )
                         continue
 
                 decision = CSEFeedback.to_decision(cse_feedback)
@@ -756,12 +815,44 @@ class CSEFeedbackLoader:
                 counts["errors"] += 1
                 continue
 
+        # Log unknown feedback values for diagnostics
+        if unknown_values:
+            logger.warning(
+                f"Unknown feedback values encountered ({len(unknown_values)} unique): "
+                f"{dict(sorted(unknown_values.items(), key=lambda x: -x[1])[:10])}"
+            )
+
+        # Diagnostic: alert if zero positives
+        if counts["correct"] == 0 and counts["need_to_swap"] == 0:
+            total_rows = len(feedback_rows)
+            accounted = (
+                counts["correct"] + counts["not_correct"] + counts["need_to_swap"]
+                + counts["not_sure_skipped"] + counts["no_b365_skipped"]
+                + counts["no_feedback_value"] + counts["unknown_feedback_value"]
+                + counts["errors"]
+            )
+            unaccounted = total_rows - accounted
+            logger.error(
+                f"ZERO POSITIVES: {total_rows} feedback rows fetched but 0 marked 'Correct'. "
+                f"Breakdown: not_correct={counts['not_correct']}, "
+                f"not_sure={counts['not_sure_skipped']}, "
+                f"no_b365={counts['no_b365_skipped']}, "
+                f"no_feedback_value={counts['no_feedback_value']}, "
+                f"unknown_values={counts['unknown_feedback_value']}, "
+                f"errors={counts['errors']}, "
+                f"unaccounted={unaccounted}. "
+                f"Check if the CSE team is marking matches as 'Correct' or if "
+                f"the feedback API response format has changed."
+            )
+
         logger.info(
             f"CSE feedback → {total_pairs} training pairs "
             f"(correct={counts['correct']}, not_correct={counts['not_correct']}, "
             f"swapped={counts['need_to_swap']}, "
             f"skipped_not_sure={counts['not_sure_skipped']}, "
             f"skipped_no_b365={counts['no_b365_skipped']}, "
+            f"no_feedback_value={counts['no_feedback_value']}, "
+            f"unknown_feedback_value={counts['unknown_feedback_value']}, "
             f"errors={counts['errors']})"
         )
         return total_pairs, counts

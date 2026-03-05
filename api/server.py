@@ -300,14 +300,36 @@ async def self_train(request: SelfTrainRequest, background_tasks: BackgroundTask
             "feedback_counts": counts,
         }
 
+    positives = store.get_positives()
+    hard_negatives = store.get_hard_negatives()
+
     if request.dry_run:
         return {
             "status": "dry_run",
             "feedback_rows": len(feedback_rows),
             "training_pairs": n_pairs,
             "feedback_counts": counts,
-            "positives": len(store.get_positives()),
-            "hard_negatives": len(store.get_hard_negatives()),
+            "positives": len(positives),
+            "hard_negatives": len(hard_negatives),
+        }
+
+    # Validation gate: block single-class training
+    if len(positives) == 0 and len(hard_negatives) > 0:
+        logger.error(
+            f"TRAINING BLOCKED: 0 positives, {len(hard_negatives)} negatives. "
+            f"Feedback counts: {counts}"
+        )
+        return {
+            "status": "blocked_single_class",
+            "message": (
+                f"Training blocked: 0 positive examples found out of "
+                f"{len(feedback_rows)} feedback rows. Only {len(hard_negatives)} "
+                f"negatives exist. Training on single-class data produces a "
+                f"useless model. Check why CSE feedback has no 'Correct' entries."
+            ),
+            "feedback_counts": counts,
+            "positives": 0,
+            "hard_negatives": len(hard_negatives),
         }
 
     all_pairs = store.get_training_pairs()

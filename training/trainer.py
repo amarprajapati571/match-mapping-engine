@@ -231,6 +231,8 @@ class DatasetBuilder:
                 f"ONLY negatives ({len(negatives)}) found — no positives. "
                 "Attempting to load cached positive pairs..."
             )
+
+            # Strategy 1: Load from training_pairs.json cache
             cached_path = os.path.join(CONFIG.data_dir, "training_pairs.json")
             if os.path.exists(cached_path):
                 try:
@@ -250,12 +252,34 @@ class DatasetBuilder:
                         logger.info(f"Loaded {len(cached_positives)} positive pairs from cache: {cached_path}")
                         return pairs + cached_positives
                 except Exception as e:
-                    logger.warning(f"Failed to load cached pairs: {e}")
+                    logger.warning(f"Failed to load cached pairs from {cached_path}: {e}")
 
-            logger.warning(
-                "No cached positives available. Training with negatives only "
-                "will produce a model that always predicts 'no match'. "
-                "Please provide 'Correct' feedback to get positive examples."
+            # Strategy 2: Load from labeled_records.json (historical labels)
+            labeled_path = os.path.join(CONFIG.data_dir, "labeled_records.json")
+            if os.path.exists(labeled_path):
+                try:
+                    with open(labeled_path, "r") as f:
+                        labeled_data = json.load(f)
+                    from core.feedback import BulkFeedbackLoader, FeedbackStore
+                    temp_store = FeedbackStore()
+                    n_loaded = BulkFeedbackLoader.load_from_records(labeled_data, temp_store)
+                    loaded_positives = temp_store.get_positives()
+                    if loaded_positives:
+                        logger.info(
+                            f"Loaded {len(loaded_positives)} positive pairs from "
+                            f"labeled_records.json ({n_loaded} total pairs)"
+                        )
+                        return pairs + loaded_positives
+                except Exception as e:
+                    logger.warning(f"Failed to load labeled records: {e}")
+
+            logger.error(
+                "CRITICAL: No cached positives available from any source. "
+                "Training with negatives only will produce a model that always "
+                "predicts 'no match'. This training run should be BLOCKED. "
+                "Please provide 'Correct' feedback to get positive examples, "
+                "or place a training_pairs.json or labeled_records.json file "
+                f"in the data directory ({CONFIG.data_dir})."
             )
 
         return pairs
@@ -661,6 +685,17 @@ class TrainingOrchestrator:
             "test_negatives": sum(1 for p in self.test_pairs if p.label == 0.0),
         }
         logger.info(f"Dataset stats: {json.dumps(stats, indent=2)}")
+
+        # Final single-class check after all balancing attempts
+        if pos_total == 0 or neg_total == 0:
+            logger.error(
+                f"SINGLE-CLASS DATASET after balancing: "
+                f"{pos_total} positives, {neg_total} negatives. "
+                f"Model trained on this data will be useless. "
+                f"Original data had {len(self.pairs)} pairs, "
+                f"balancing added {len(balanced_pairs) - len(self.pairs)} synthetic pairs."
+            )
+
         return stats
 
     def train_sbert(self, output_path: str = None) -> Optional[str]:
