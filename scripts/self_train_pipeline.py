@@ -17,6 +17,8 @@ Usage:
     python scripts/self_train_pipeline.py --platform ODDSPORTAL --sbert-only
     python scripts/self_train_pipeline.py --platform ODDSPORTAL --ce-only
     python scripts/self_train_pipeline.py --platform ODDSPORTAL --dry-run
+    python scripts/self_train_pipeline.py --all-platforms
+    python scripts/self_train_pipeline.py --all-platforms --dry-run
 """
 
 import sys
@@ -61,6 +63,11 @@ def main():
     parser.add_argument(
         "--platform", default="ODDSPORTAL",
         help="Platform to fetch feedback for (default: ODDSPORTAL)",
+    )
+    parser.add_argument(
+        "--all-platforms", action="store_true",
+        help="Fetch from ALL platforms (ODDSPORTAL, SBO, FLASHSCORE, SOFASCORE) "
+             "and train on combined dataset. Overrides --platform.",
     )
     parser.add_argument(
         "--use-local", action="store_true",
@@ -138,18 +145,61 @@ def main():
             return
         print(f"  Loaded {len(feedback_rows)} feedback rows from file")
         snapshot_path = args.input_file
+        per_platform_counts = {"cached_file": len(feedback_rows)}
     else:
-        print("Step 1: Fetching CSE team feedback...")
-        feedback_rows = CSEFeedbackLoader.fetch_feedback(
-            platform=args.platform,
-            url=args.api_url,
-        )
+        # Determine which platforms to fetch
+        if args.all_platforms:
+            platforms = [
+                p.strip().upper()
+                for p in CONFIG.feedback_api.self_train_platforms.split(",")
+                if p.strip()
+            ]
+            print(f"Step 1: Fetching CSE feedback from ALL platforms: {platforms}")
+        else:
+            platforms = [args.platform]
+            print(f"Step 1: Fetching CSE team feedback from {args.platform}...")
+
+        # Fetch feedback from each platform sequentially
+        feedback_rows = []
+        per_platform_counts = {}
+
+        for platform in platforms:
+            print(f"\n  Fetching from {platform}...")
+            try:
+                rows = CSEFeedbackLoader.fetch_feedback(
+                    platform=platform,
+                    url=args.api_url,
+                )
+                row_count = len(rows) if rows else 0
+                per_platform_counts[platform] = row_count
+                if rows:
+                    feedback_rows.extend(rows)
+                    print(f"    {platform}: {row_count} feedback rows")
+                else:
+                    print(f"    {platform}: no data returned")
+            except Exception as e:
+                logger.error(f"Failed to fetch from {platform}: {e}")
+                per_platform_counts[platform] = 0
+                print(f"    {platform}: ERROR - {e}")
+
+        # Per-platform summary
+        if args.all_platforms:
+            active_platforms = sum(1 for c in per_platform_counts.values() if c > 0)
+            print(f"\n  Per-platform summary:")
+            for plat, count in per_platform_counts.items():
+                status = f"{count} rows" if count > 0 else "no data"
+                print(f"    {plat}: {status}")
+            print(f"    TOTAL: {len(feedback_rows)} rows from {active_platforms}/{len(platforms)} platforms")
+
         if not feedback_rows:
             print("\n  No feedback rows returned from API. Nothing to train on.")
             return
-        print(f"  Fetched {len(feedback_rows)} feedback rows")
+        print(f"\n  Total fetched: {len(feedback_rows)} feedback rows")
         os.makedirs("data", exist_ok=True)
-        snapshot_path = os.path.join("data", f"cse_feedback_{timestamp}.json")
+        if args.all_platforms:
+            snapshot_path = os.path.join("data", f"cse_feedback_all_platforms_{timestamp}.json")
+        else:
+            snapshot_path = os.path.join("data", f"cse_feedback_{timestamp}.json")
         save_feedback_snapshot(feedback_rows, snapshot_path)
 
     # ── Step 2: Convert Feedback to Training Pairs ──
@@ -296,7 +346,8 @@ def main():
 
     training_result = {
         "timestamp": timestamp,
-        "platform": args.platform,
+        "platform": "ALL" if args.all_platforms else args.platform,
+        "platforms_fetched": per_platform_counts,
         "feedback_counts": feedback_counts,
         "total_feedback_rows": len(feedback_rows),
         "total_training_pairs": len(all_pairs),
@@ -339,6 +390,13 @@ def main():
     print("\n" + "=" * 70)
     print("  SELF-TRAINING COMPLETE")
     print("=" * 70)
+    # Show per-platform breakdown in summary
+    if args.all_platforms:
+        print(f"\n  Platforms fetched:")
+        for plat, count in per_platform_counts.items():
+            status = f"{count} rows" if count > 0 else "no data"
+            print(f"    {plat}: {status}")
+
     print(f"""
   CSE Feedback:
     Total rows fetched:  {len(feedback_rows)}

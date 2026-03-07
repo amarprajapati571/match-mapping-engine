@@ -145,6 +145,11 @@ class FeedbackAPIConfig:
 
     max_parallel_workers: int = int(os.getenv("FEEDBACK_API_MAX_WORKERS", "10"))
 
+    # Platforms to fetch when --all-platforms is used (comma-separated)
+    self_train_platforms: str = os.getenv(
+        "SELF_TRAIN_PLATFORMS", "ODDSPORTAL,SBO,FLASHSCORE,SOFASCORE"
+    )
+
     min_feedback_for_training: int = int(os.getenv("MIN_FEEDBACK_FOR_TRAINING", "50"))
     auto_reload_after_training: bool = os.getenv("AUTO_RELOAD_AFTER_TRAINING", "true").lower() == "true"
 

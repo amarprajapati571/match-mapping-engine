@@ -123,6 +123,8 @@ class ModelReloadRequest(BaseModel):
 
 class SelfTrainRequest(BaseModel):
     platform: str = "ODDSPORTAL"
+    platforms: Optional[List[str]] = None  # Explicit list: ["ODDSPORTAL", "SBO"]
+    all_platforms: bool = False            # Fetch from ALL registered platforms
     use_local_api: bool = False
     api_url: Optional[str] = None
     sbert_only: bool = False
@@ -271,15 +273,41 @@ async def self_train(request: SelfTrainRequest, background_tasks: BackgroundTask
     if request.use_local_api:
         CONFIG.feedback_api.use_local = True
 
-    feedback_rows = CSEFeedbackLoader.fetch_feedback(
-        platform=request.platform,
-        url=request.api_url,
-    )
+    # Determine which platforms to fetch
+    if request.all_platforms:
+        platforms = [
+            p.strip().upper()
+            for p in CONFIG.feedback_api.self_train_platforms.split(",")
+            if p.strip()
+        ]
+    elif request.platforms:
+        platforms = [p.strip().upper() for p in request.platforms]
+    else:
+        platforms = [request.platform]
+
+    # Fetch feedback from each platform sequentially
+    feedback_rows = []
+    per_platform_counts = {}
+
+    for platform in platforms:
+        try:
+            rows = CSEFeedbackLoader.fetch_feedback(
+                platform=platform,
+                url=request.api_url,
+            )
+            row_count = len(rows) if rows else 0
+            per_platform_counts[platform] = row_count
+            if rows:
+                feedback_rows.extend(rows)
+        except Exception as e:
+            logger.error(f"Failed to fetch feedback from {platform}: {e}")
+            per_platform_counts[platform] = 0
 
     if not feedback_rows:
         return {
             "status": "no_data",
-            "message": "No feedback rows returned from CSE API.",
+            "message": "No feedback rows returned from any platform.",
+            "per_platform_counts": per_platform_counts,
         }
 
     store = FeedbackStore()
@@ -298,6 +326,7 @@ async def self_train(request: SelfTrainRequest, background_tasks: BackgroundTask
                 f"Collect more CSE reviews."
             ),
             "feedback_counts": counts,
+            "per_platform_counts": per_platform_counts,
         }
 
     positives = store.get_positives()
@@ -311,6 +340,7 @@ async def self_train(request: SelfTrainRequest, background_tasks: BackgroundTask
             "feedback_counts": counts,
             "positives": len(positives),
             "hard_negatives": len(hard_negatives),
+            "per_platform_counts": per_platform_counts,
         }
 
     # Validation gate: block single-class training
@@ -330,6 +360,7 @@ async def self_train(request: SelfTrainRequest, background_tasks: BackgroundTask
             "feedback_counts": counts,
             "positives": 0,
             "hard_negatives": len(hard_negatives),
+            "per_platform_counts": per_platform_counts,
         }
 
     all_pairs = store.get_training_pairs()
@@ -377,6 +408,8 @@ async def self_train(request: SelfTrainRequest, background_tasks: BackgroundTask
         "feedback_rows": len(feedback_rows),
         "training_pairs": n_pairs,
         "feedback_counts": counts,
+        "per_platform_counts": per_platform_counts,
+        "platforms": platforms,
         "auto_reload": request.auto_reload,
     }
 
