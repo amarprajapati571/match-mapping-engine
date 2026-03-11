@@ -100,12 +100,12 @@ class GateConfig:
 @dataclass
 class TrainingConfig:
     """Training hyperparameters (batch sizes optimized for RTX 3060 12GB)."""
-    sbert_epochs: int = int(os.getenv("SBERT_EPOCHS", "3"))
+    sbert_epochs: int = int(os.getenv("SBERT_EPOCHS", "5"))
     sbert_lr: float = float(os.getenv("SBERT_LR", "2e-5"))
     sbert_warmup_ratio: float = 0.1
-    sbert_batch_size: int = int(os.getenv("SBERT_BATCH_SIZE", "128"))
+    sbert_batch_size: int = int(os.getenv("SBERT_BATCH_SIZE", "32"))
 
-    ce_epochs: int = int(os.getenv("CE_EPOCHS", "3"))
+    ce_epochs: int = int(os.getenv("CE_EPOCHS", "5"))
     ce_lr: float = float(os.getenv("CE_LR", "2e-5"))
     ce_batch_size: int = int(os.getenv("CE_BATCH_SIZE", "64"))
 
@@ -118,6 +118,8 @@ class TrainingConfig:
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     test_ratio: float = 0.1
+
+    early_stopping_patience: int = int(os.getenv("EARLY_STOPPING_PATIENCE", "2"))
 
     max_hard_negatives_per_positive: int = 4
     min_hard_negative_score: float = 0.3

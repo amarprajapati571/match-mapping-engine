@@ -182,6 +182,106 @@ class DatasetBuilder:
         return negatives
 
     @staticmethod
+    def generate_league_aware_negatives(
+        positive_pairs: List[TrainingPair],
+        target_ratio: float = 1.5,
+        seed: int = 42,
+    ) -> List[TrainingPair]:
+        """
+        Generate hard negatives by pairing anchors with candidates from the
+        SAME league but DIFFERENT matches. These are much harder for the model
+        to distinguish than random shuffles because the league context overlaps.
+
+        Strategy:
+          1. Group positive pairs by league prefix (extracted from text).
+          2. Within each league group, pair each anchor with candidates from
+             other matches in the same league.
+          3. Fall back to cross-league pairing if a league has only 1 match.
+
+        Args:
+            positive_pairs: List of positive (label=1.0) training pairs.
+            target_ratio: Target negatives per positive (e.g., 1.5 = 50% more negs than pos).
+            seed: Random seed for reproducibility.
+
+        Returns:
+            List of hard negative TrainingPair objects.
+        """
+        if len(positive_pairs) < 2:
+            logger.warning("Need at least 2 positive pairs for league-aware negatives")
+            return []
+
+        rng = random.Random(seed)
+
+        # Group by league prefix (text before first " | ")
+        league_groups: Dict[str, List[TrainingPair]] = {}
+        for pair in positive_pairs:
+            league_key = pair.anchor_text.split(" | ")[0].strip().lower() if " | " in pair.anchor_text else "_unknown"
+            league_groups.setdefault(league_key, []).append(pair)
+
+        target_count = int(len(positive_pairs) * target_ratio)
+        negatives = []
+        seen_keys = set()
+
+        # Phase 1: Same-league hard negatives (strongest signal)
+        for league_key, group in league_groups.items():
+            if len(group) < 2:
+                continue
+            candidates_in_league = [p.candidate_text for p in group]
+            for pair in group:
+                # Pick a wrong candidate from the same league
+                wrong_candidates = [c for c in candidates_in_league if c != pair.candidate_text]
+                if not wrong_candidates:
+                    continue
+                wrong = rng.choice(wrong_candidates)
+                dedup_key = (pair.anchor_text, wrong)
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+                negatives.append(TrainingPair(
+                    anchor_text=pair.anchor_text,
+                    candidate_text=wrong,
+                    label=0.0,
+                    is_hard_negative=True,
+                    source_suggestion_id=f"league_neg_{pair.source_suggestion_id or pair.pair_id}",
+                ))
+                if len(negatives) >= target_count:
+                    break
+            if len(negatives) >= target_count:
+                break
+
+        # Phase 2: Cross-league negatives if we haven't hit the target
+        if len(negatives) < target_count:
+            all_candidates = [p.candidate_text for p in positive_pairs]
+            for pair in positive_pairs:
+                if len(negatives) >= target_count:
+                    break
+                wrong = rng.choice(all_candidates)
+                attempts = 0
+                while wrong == pair.candidate_text and attempts < 10:
+                    wrong = rng.choice(all_candidates)
+                    attempts += 1
+                if wrong == pair.candidate_text:
+                    continue
+                dedup_key = (pair.anchor_text, wrong)
+                if dedup_key in seen_keys:
+                    continue
+                seen_keys.add(dedup_key)
+                negatives.append(TrainingPair(
+                    anchor_text=pair.anchor_text,
+                    candidate_text=wrong,
+                    label=0.0,
+                    is_hard_negative=True,
+                    source_suggestion_id=f"xleague_neg_{pair.source_suggestion_id or pair.pair_id}",
+                ))
+
+        logger.info(
+            f"League-aware hard negatives: {len(negatives)} generated "
+            f"from {len(positive_pairs)} positives "
+            f"({len(league_groups)} league groups, target_ratio={target_ratio})"
+        )
+        return negatives
+
+    @staticmethod
     def ensure_both_classes(
         pairs: List[TrainingPair],
         target_neg_ratio: int = 1,
@@ -201,29 +301,37 @@ class DatasetBuilder:
         )
 
         if positives and negatives:
-            ratio = min(len(positives), len(negatives)) / max(len(positives), len(negatives))
-            if ratio < 0.05:
-                logger.warning(
-                    f"Severe class imbalance (ratio={ratio:.3f}). "
-                    "Augmenting minority class."
-                )
-                if len(negatives) < len(positives):
-                    needed = max(int(len(positives) * 0.2) - len(negatives), 0)
-                    if needed > 0:
-                        extra = DatasetBuilder.generate_hard_negatives(
-                            positives,
-                            negatives_per_positive=max(1, needed // len(positives) + 1),
-                        )
-                        pairs = pairs + extra[:needed]
-                        logger.info(f"Added {min(len(extra), needed)} synthetic negatives to balance")
+            pos_neg_ratio = len(positives) / max(len(negatives), 1)
+            if pos_neg_ratio > 2.5:
+                # Class imbalance: too many positives vs negatives
+                # Use league-aware mining to generate strong negatives
+                target = max(len(positives) / 2.0, len(negatives))
+                needed = int(target) - len(negatives)
+                if needed > 0:
+                    logger.info(
+                        f"Class imbalance (pos:neg = {pos_neg_ratio:.1f}:1). "
+                        f"Mining {needed} league-aware hard negatives to reach ~2:1 ratio."
+                    )
+                    extra = DatasetBuilder.generate_league_aware_negatives(
+                        positives,
+                        target_ratio=needed / max(len(positives), 1),
+                    )
+                    pairs = pairs + extra[:needed]
+                    logger.info(f"Added {min(len(extra), needed)} league-aware negatives to balance")
             return pairs
 
         if positives and not negatives:
             logger.warning(
                 f"ONLY positives ({len(positives)}) found — no negatives. "
-                f"Generating {len(positives) * target_neg_ratio} synthetic hard negatives."
+                f"Generating league-aware hard negatives."
             )
-            synthetic = DatasetBuilder.generate_hard_negatives(positives, target_neg_ratio)
+            synthetic = DatasetBuilder.generate_league_aware_negatives(
+                positives, target_ratio=float(target_neg_ratio),
+            )
+            if len(synthetic) < len(positives) * target_neg_ratio * 0.5:
+                # Fall back to random shuffling if league-aware didn't generate enough
+                extra = DatasetBuilder.generate_hard_negatives(positives, target_neg_ratio)
+                synthetic = synthetic + extra
             return pairs + synthetic
 
         if negatives and not positives:
@@ -439,6 +547,7 @@ class SBERTTrainer:
                 eval_dataset = self._examples_to_dataset(val_examples)
 
             has_eval = eval_dataset is not None
+            patience = CONFIG.training.early_stopping_patience
             # Compute warmup_steps from ratio (warmup_ratio is deprecated in v5.2+)
             steps_per_epoch = max(1, len(train_dataset) // batch_size)
             total_steps = steps_per_epoch * epochs
@@ -457,7 +566,14 @@ class SBERTTrainer:
                 save_strategy="epoch",
                 logging_steps=50,
                 load_best_model_at_end=has_eval,
+                metric_for_best_model="eval_loss" if has_eval else None,
             )
+
+            callbacks = []
+            if has_eval and patience > 0:
+                from transformers import EarlyStoppingCallback
+                callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
+                logger.info(f"Early stopping enabled (patience={patience} epochs)")
 
             trainer = SentenceTransformerTrainer(
                 model=self.model,
@@ -465,6 +581,7 @@ class SBERTTrainer:
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
                 loss=train_loss,
+                callbacks=callbacks,
             )
             trainer.train()
             self.model.save(output_path)
@@ -581,6 +698,9 @@ class CrossEncoderTrainer:
                 CrossEncoderTrainingArguments,
             )
 
+            has_eval = eval_dataset is not None
+            patience = CONFIG.training.early_stopping_patience
+
             # Compute warmup_steps from ratio (warmup_ratio is deprecated in v5.2+)
             steps_per_epoch = max(1, len(train_dataset) // batch_size)
             total_steps_ce = steps_per_epoch * epochs
@@ -595,16 +715,26 @@ class CrossEncoderTrainer:
                 fp16=use_amp,
                 dataloader_num_workers=num_workers,
                 dataloader_pin_memory=device == "cuda",
+                eval_strategy="epoch" if has_eval else "no",
                 save_strategy="epoch",
                 logging_steps=50,
                 report_to="none",
+                load_best_model_at_end=has_eval,
+                metric_for_best_model="eval_loss" if has_eval else None,
             )
+
+            callbacks = []
+            if has_eval and patience > 0:
+                from transformers import EarlyStoppingCallback
+                callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
+                logger.info(f"CE early stopping enabled (patience={patience} epochs)")
 
             trainer = STCrossEncoderTrainer(
                 model=self.model,
                 args=training_args,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
+                callbacks=callbacks,
             )
             trainer.train()
             self.model.save_pretrained(output_path)

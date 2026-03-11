@@ -117,6 +117,19 @@ def main():
         "--min-feedback", type=int, default=None,
         help="Minimum feedback rows required to start training",
     )
+    parser.add_argument(
+        "--include-aliases", action="store_true",
+        help="Merge alias training data (from admin_leagues.json + admin_teams.json) "
+             "with CSE feedback for a larger, more balanced dataset (~55K pairs)",
+    )
+    parser.add_argument(
+        "--leagues-file", default="data/admin_leagues.json",
+        help="Path to leagues JSON for --include-aliases (default: data/admin_leagues.json)",
+    )
+    parser.add_argument(
+        "--teams-file", default="data/admin_teams.json",
+        help="Path to teams JSON for --include-aliases (default: data/admin_teams.json)",
+    )
     args = parser.parse_args()
 
     if args.epochs:
@@ -218,6 +231,44 @@ def main():
         feedback_rows, store
     )
 
+    # ── Merge Alias Training Data (optional) ──
+    alias_pairs_count = 0
+    if args.include_aliases:
+        print(f"\n  Merging alias training data...")
+        try:
+            from scripts.train_from_aliases import (
+                generate_league_pairs, generate_team_pairs, generate_hard_negatives,
+            )
+            from core.league_loader import load_leagues_from_file
+            from core.team_loader import load_teams_from_file
+
+            leagues = load_leagues_from_file(args.leagues_file)
+            teams = load_teams_from_file(args.teams_file)
+
+            if leagues or teams:
+                league_pairs = generate_league_pairs(leagues) if leagues else []
+                team_pairs = generate_team_pairs(teams) if teams else []
+                alias_positives = league_pairs + team_pairs
+
+                # Generate balanced hard negatives for alias data
+                alias_negatives = generate_hard_negatives(
+                    teams, n_negatives=len(alias_positives),
+                ) if teams else []
+
+                for p in alias_positives + alias_negatives:
+                    store.add_training_pair(p)
+                alias_pairs_count = len(alias_positives) + len(alias_negatives)
+
+                print(f"    Alias league pairs:  {len(league_pairs)}")
+                print(f"    Alias team pairs:    {len(team_pairs)}")
+                print(f"    Alias negatives:     {len(alias_negatives)}")
+                print(f"    Alias total:         {alias_pairs_count}")
+            else:
+                print(f"    WARNING: No leagues/teams data found at {args.leagues_file} / {args.teams_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load alias data: {e}")
+            print(f"    WARNING: Alias merge failed: {e}")
+
     print(f"\n  Feedback breakdown:")
     print(f"    Correct (→ positive):       {feedback_counts['correct']}")
     print(f"    Not correct (→ negative):   {feedback_counts['not_correct']}")
@@ -253,6 +304,8 @@ def main():
     print(f"    Total pairs:     {len(all_pairs)}")
     print(f"    Positives:       {len(positives)}")
     print(f"    Hard negatives:  {len(negatives)}")
+    if alias_pairs_count > 0:
+        print(f"    (includes {alias_pairs_count} alias pairs)")
 
     if not positives and negatives:
         print("\n  !! SINGLE-CLASS ALERT: Only NEGATIVE examples found (0 positives).")
