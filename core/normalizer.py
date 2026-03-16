@@ -261,6 +261,12 @@ _SPLIT_PATTERN = re.compile(r"[\s\-/]+")
 _NOISE_TOKENS = frozenset({
     "fc", "sc", "cf", "ac", "afc", "ssc", "se", "cr", "fk", "sk",
     "bk", "if", "hc", "ik", "the", "de", "la", "el", "al",
+    # Portuguese/Spanish/Italian prepositions (common in South American team names)
+    "dos", "das", "do", "da", "del", "di", "du",
+    # Sport-type qualifiers (added/removed inconsistently across providers)
+    "volei", "voleibol", "futsal", "basquete", "basquet", "handball",
+    # Reserve/youth team qualifiers (used inconsistently: "Jong X" ↔ "X Reserves")
+    "jong", "reserves", "reserve", "reserva",
 })
 
 # ═══════════════════════════════════════════════
@@ -296,6 +302,8 @@ def clean_text(text: str) -> str:
     """Basic text cleaning: lowercase, strip extra whitespace, normalize."""
     text = normalize_unicode(text)
     text = text.lower().strip()
+    # Remove apostrophes to keep tokens intact: "Newell's" → "newells"
+    text = text.replace("'", "").replace("\u2019", "").replace("\u2018", "")
     text = _STRIP_PATTERN.sub(" ", text)
     text = _MULTI_SPACE.sub(" ", text)
     return text.strip()
@@ -345,6 +353,17 @@ def is_acronym_of(short_text: str, long_text: str) -> bool:
         return False
 
     return all(s == w[0] for s, w in zip(short, words))
+
+
+def _is_prefix_abbrev(short_tok: str, long_tok: str, min_len: int = 2) -> bool:
+    """
+    Check if short_tok (after stripping dots) is a prefix abbreviation of long_tok.
+    e.g., "sp." is prefix of "sportivo", "atl" is prefix of "atletico".
+    Requires minimum prefix length of 2 to avoid false positives.
+    """
+    s = short_tok.rstrip(".")
+    l = long_tok.rstrip(".")
+    return len(s) >= min_len and len(s) < len(l) and l.startswith(s)
 
 
 @lru_cache(maxsize=4096)
@@ -448,6 +467,7 @@ def _team_pair_sim(name_a: str, name_b: str) -> float:
     Resolution order:
       1. Alias dict lookup (handles nicknames: "Spurs" → "Tottenham Hotspur")
       2. Acronym auto-detection (handles "MI" ↔ "Mumbai Indians" without dict)
+      2.5. Prefix abbreviation matching (handles "Sp." ↔ "Sportivo", "Atl." ↔ "Atletico")
       3. Token overlap (Jaccard) + character-level sequence matching (SequenceMatcher)
     """
     str_a = resolve_alias(name_a)
@@ -467,7 +487,39 @@ def _team_pair_sim(name_a: str, name_b: str) -> float:
     if not tokens_a or not tokens_b:
         return 0.0
 
-    intersection = tokens_a & tokens_b
+    # Layer 2.5: Prefix abbreviation matching
+    # Handles "Sp. Luqueno" ↔ "Sportivo Luqueno", "Atl. Nacional" ↔ "Atletico Nacional"
+    # Requires at least one exact token match to prevent false positives like
+    # "San Lorenzo" vs "Santos" (no common exact token).
+    exact_matches = tokens_a & tokens_b
+    if exact_matches:
+        shorter, longer = (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b) else (tokens_b, tokens_a)
+        used_longer = set()
+        all_match = True
+        for s_tok in shorter:
+            found = False
+            for l_tok in longer:
+                if l_tok in used_longer:
+                    continue
+                s_clean = s_tok.rstrip(".")
+                l_clean = l_tok.rstrip(".")
+                if s_clean == l_clean:
+                    used_longer.add(l_tok)
+                    found = True
+                    break
+                if _is_prefix_abbrev(s_tok, l_tok) or _is_prefix_abbrev(l_tok, s_tok):
+                    used_longer.add(l_tok)
+                    found = True
+                    break
+            if not found:
+                all_match = False
+                break
+
+        if all_match and len(shorter) > 0:
+            coverage = len(used_longer) / len(longer) if longer else 1.0
+            return 0.90 + 0.10 * coverage
+
+    intersection = exact_matches
     union = tokens_a | tokens_b
     jaccard = len(intersection) / len(union)
 
