@@ -60,16 +60,41 @@ class DatasetBuilder:
         train_ratio: float = None,
         val_ratio: float = None,
         seed: int = 42,
+        temporal: bool = False,
     ) -> Tuple[List[TrainingPair], List[TrainingPair], List[TrainingPair]]:
         """
-        Split pairs into train/val/test with stratified sampling.
-        Groups by source_suggestion_id to prevent data leakage, then
-        stratifies by each group's majority label so every split has
-        both positives and negatives.
+        Split pairs into train/val/test.
+
+        If temporal=True: sorts by created_at and uses time-based cutoffs
+        (train on older data, validate/test on newer data). This gives more
+        realistic performance estimates since team names and formats evolve.
+
+        If temporal=False (default): stratified random split grouped by
+        source_suggestion_id to prevent data leakage.
         """
         train_r = train_ratio or CONFIG.training.train_ratio
         val_r = val_ratio or CONFIG.training.val_ratio
         test_r = max(1.0 - train_r - val_r, 0.05)
+
+        # ── Temporal split: train on older data, test on newer ──
+        if temporal:
+            sorted_pairs = sorted(pairs, key=lambda p: p.created_at)
+            n = len(sorted_pairs)
+            train_end = int(n * train_r)
+            val_end = int(n * (train_r + val_r))
+            train = sorted_pairs[:train_end]
+            val = sorted_pairs[train_end:val_end]
+            test = sorted_pairs[val_end:]
+
+            for name, split in [("train", train), ("val", val), ("test", test)]:
+                pos = sum(1 for p in split if p.label == 1.0)
+                neg = len(split) - pos
+                dates = [p.created_at for p in split] if split else []
+                date_range = f"{min(dates).date()} — {max(dates).date()}" if dates else "empty"
+                logger.info(f"  {name}: {len(split)} pairs (pos={pos}, neg={neg}) [{date_range}]")
+
+            logger.info("Using TEMPORAL split (train=oldest, test=newest)")
+            return train, val, test
 
         groups: Dict[str, List[TrainingPair]] = {}
         for p in pairs:
@@ -302,22 +327,27 @@ class DatasetBuilder:
 
         if positives and negatives:
             pos_neg_ratio = len(positives) / max(len(negatives), 1)
-            if pos_neg_ratio > 2.5:
-                # Class imbalance: too many positives vs negatives
-                # Use league-aware mining to generate strong negatives
-                target = max(len(positives) / 2.0, len(negatives))
-                needed = int(target) - len(negatives)
+            # P0 report: optimal ratio ~1.4:1. Drift above 1.8:1 hurts SBERT gap.
+            # Auto-enrich negatives when ratio exceeds 1.5:1 to target ~1.0:1.
+            if pos_neg_ratio > 1.5:
+                target = len(positives)  # target 1:1 ratio
+                needed = target - len(negatives)
                 if needed > 0:
                     logger.info(
-                        f"Class imbalance (pos:neg = {pos_neg_ratio:.1f}:1). "
-                        f"Mining {needed} league-aware hard negatives to reach ~2:1 ratio."
+                        f"Ratio drift detected (pos:neg = {pos_neg_ratio:.2f}:1, optimal ~1.4:1). "
+                        f"Mining {needed} league-aware hard negatives to reach ~1:1 ratio."
                     )
                     extra = DatasetBuilder.generate_league_aware_negatives(
                         positives,
                         target_ratio=needed / max(len(positives), 1),
                     )
                     pairs = pairs + extra[:needed]
-                    logger.info(f"Added {min(len(extra), needed)} league-aware negatives to balance")
+                    new_neg = len(negatives) + min(len(extra), needed)
+                    new_ratio = len(positives) / max(new_neg, 1)
+                    logger.info(
+                        f"Added {min(len(extra), needed)} league-aware negatives. "
+                        f"New ratio: {new_ratio:.2f}:1"
+                    )
             return pairs
 
         if positives and not negatives:
@@ -559,6 +589,7 @@ class SBERTTrainer:
                 gradient_accumulation_steps=grad_accum,
                 learning_rate=lr,
                 warmup_steps=warmup_steps,
+                lr_scheduler_type=CONFIG.training.lr_scheduler_type,
                 fp16=use_amp and device == "cuda",
                 dataloader_num_workers=num_workers,
                 dataloader_pin_memory=torch.cuda.is_available(),
@@ -712,6 +743,7 @@ class CrossEncoderTrainer:
                 gradient_accumulation_steps=grad_accum,
                 learning_rate=lr,
                 warmup_steps=warmup_steps_ce,
+                lr_scheduler_type=CONFIG.training.lr_scheduler_type,
                 fp16=use_amp,
                 dataloader_num_workers=num_workers,
                 dataloader_pin_memory=device == "cuda",
@@ -777,8 +809,9 @@ class TrainingOrchestrator:
     Coordinates dataset building, class balancing, training, and model versioning.
     """
 
-    def __init__(self, training_pairs: List[TrainingPair]):
+    def __init__(self, training_pairs: List[TrainingPair], temporal_split: bool = False):
         self.pairs = training_pairs
+        self.temporal_split = temporal_split
         self.train_pairs = []
         self.val_pairs = []
         self.test_pairs = []
@@ -792,7 +825,7 @@ class TrainingOrchestrator:
         balanced_pairs = DatasetBuilder.ensure_both_classes(self.pairs)
 
         self.train_pairs, self.val_pairs, self.test_pairs = (
-            DatasetBuilder.split_pairs(balanced_pairs)
+            DatasetBuilder.split_pairs(balanced_pairs, temporal=self.temporal_split)
         )
 
         pos_total = sum(1 for p in balanced_pairs if p.label == 1.0)

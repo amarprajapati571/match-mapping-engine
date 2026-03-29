@@ -709,4 +709,12 @@ class InferenceEngine:
             # Also note if league was low (soft penalty applied)
             if not details["league_gate"]:
                 details["soft_warnings"] = ["league_gate (soft penalty applied)"]
+
+            # P2: Auto-reject when score is very low (no review needed)
+            if top1.score <= gates.auto_reject_score:
+                details["auto_reject_reason"] = (
+                    f"Score {top1.score:.4f} <= {gates.auto_reject_score} auto-reject threshold"
+                )
+                return GateResult.AUTO_REJECT, details
+
             return GateResult.NEED_REVIEW, details

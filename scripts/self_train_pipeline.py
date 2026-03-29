@@ -130,6 +130,11 @@ def main():
         "--teams-file", default="data/admin_teams.json",
         help="Path to teams JSON for --include-aliases (default: data/admin_teams.json)",
     )
+    parser.add_argument(
+        "--temporal-split", action="store_true",
+        help="Use temporal train/test split (train on older data, test on newer) "
+             "for more realistic evaluation",
+    )
     args = parser.parse_args()
 
     if args.epochs:
@@ -316,9 +321,22 @@ def main():
         print("  Hard negatives will be generated automatically by shuffling candidates.")
     elif positives and negatives:
         ratio = min(len(positives), len(negatives)) / max(len(positives), len(negatives))
+        pos_neg_ratio = len(positives) / max(len(negatives), 1)
         print(f"    Class ratio:     {ratio:.2f} (min/max)")
+        print(f"    Pos:Neg ratio:   {pos_neg_ratio:.2f}:1")
         if ratio < 0.1:
             print("  WARNING: Severe class imbalance. Auto-balancing will be applied.")
+        if pos_neg_ratio > 3.0:
+            print("  ⚠ RATIO DRIFT WARNING: Pos:Neg ratio exceeds 3:1.")
+            print(f"    Optimal is ~1.4:1. Current {pos_neg_ratio:.2f}:1 may limit SBERT quality.")
+            print(f"    Consider enriching hard negatives (same-league same-date mining).")
+            logger.warning(
+                f"Ratio drift: {pos_neg_ratio:.2f}:1 (optimal ~1.4:1). "
+                f"{len(positives)} positives, {len(negatives)} negatives."
+            )
+        elif pos_neg_ratio < 0.33:
+            print("  ⚠ RATIO WARNING: Too many negatives relative to positives.")
+            logger.warning(f"Ratio {pos_neg_ratio:.2f}:1 — too negative-heavy.")
 
     trainable_feedback = (
         feedback_counts["correct"]
@@ -394,7 +412,7 @@ def main():
     sbert_out = args.sbert_output or f"models/sbert_cse_tuned_{timestamp}"
     ce_out = args.ce_output or f"models/ce_cse_tuned_{timestamp}"
 
-    orchestrator = TrainingOrchestrator(all_pairs)
+    orchestrator = TrainingOrchestrator(all_pairs, temporal_split=args.temporal_split)
     stats = orchestrator.prepare()
 
     training_result = {
@@ -433,6 +451,34 @@ def main():
 
         if result.get("accuracy_comparison"):
             print(result["accuracy_comparison"])
+
+        # ── Post-training regression check (P0) ──
+        ce_acc = result.get("ce_accuracy")
+        sbert_gap = result.get("sbert_gap")
+        prev_ce_acc = result.get("prev_ce_accuracy")
+        prev_sbert_gap = result.get("prev_sbert_gap")
+
+        if ce_acc is not None and prev_ce_acc is not None:
+            ce_drop = prev_ce_acc - ce_acc
+            if ce_drop > 0.01:
+                print(f"\n  ⚠ REGRESSION WARNING: CE accuracy dropped {ce_drop:.4f} "
+                      f"({prev_ce_acc:.4f} → {ce_acc:.4f})")
+                logger.warning(
+                    f"Post-training regression: CE accuracy dropped {ce_drop:.4f} "
+                    f"({prev_ce_acc:.4f} → {ce_acc:.4f}). "
+                    f"Consider reverting to previous model."
+                )
+
+        if sbert_gap is not None and prev_sbert_gap is not None:
+            gap_drop = prev_sbert_gap - sbert_gap
+            if gap_drop > 0.05:
+                print(f"\n  ⚠ REGRESSION WARNING: SBERT gap dropped {gap_drop:.4f} "
+                      f"({prev_sbert_gap:.4f} → {sbert_gap:.4f})")
+                logger.warning(
+                    f"Post-training regression: SBERT gap dropped {gap_drop:.4f} "
+                    f"({prev_sbert_gap:.4f} → {sbert_gap:.4f}). "
+                    f"Consider reverting to previous model."
+                )
 
     # ── Step 5: Save Report ──
     os.makedirs("reports", exist_ok=True)

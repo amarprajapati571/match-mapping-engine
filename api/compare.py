@@ -287,6 +287,10 @@ def compare_matches(provider: MatchInput, bet365: MatchInput, engine) -> Compare
     elif all_pass:
         verdict = "MATCH"
         verdict_reason = "All gates pass. High confidence match."
+    elif final_score <= gates_cfg.auto_reject_score:
+        failed = [g.name for g in gate_results if not g.passed]
+        verdict = "NO_MATCH"
+        verdict_reason = f"Auto-reject: score {final_score:.4f} <= {gates_cfg.auto_reject_score}. Failed gates: {', '.join(failed)}"
     else:
         failed = [g.name for g in gate_results if not g.passed]
         verdict = "NO_MATCH"

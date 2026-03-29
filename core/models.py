@@ -44,6 +44,7 @@ class CSEFeedback(str, Enum):
 class GateResult(str, Enum):
     AUTO_MATCH = "AUTO_MATCH"
     NEED_REVIEW = "NEED_REVIEW"
+    AUTO_REJECT = "AUTO_REJECT"
 
 
 class CategoryTag(str, Enum):

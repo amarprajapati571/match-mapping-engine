@@ -50,12 +50,17 @@ class ModelConfig:
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # ── Fine-tuned model paths (after training) ──
-    tuned_sbert_path: Optional[str] = None
-    tuned_cross_encoder_path: Optional[str] = None
+    # P0: Set via env vars on remote PC to deploy Mar 27 models:
+    #   TUNED_SBERT_PATH=models/sbert_cse_tuned_20260327_103829
+    #   TUNED_CE_PATH=models/ce_cse_tuned_20260327_103829
+    #   USE_TUNED_SBERT=true
+    #   USE_TUNED_CE=true
+    tuned_sbert_path: Optional[str] = os.getenv("TUNED_SBERT_PATH", None)
+    tuned_cross_encoder_path: Optional[str] = os.getenv("TUNED_CE_PATH", None)
 
     # Feature flag: use tuned models in production
-    use_tuned_sbert: bool = False
-    use_tuned_cross_encoder: bool = False
+    use_tuned_sbert: bool = os.getenv("USE_TUNED_SBERT", "false").lower() == "true"
+    use_tuned_cross_encoder: bool = os.getenv("USE_TUNED_CE", "false").lower() == "true"
 
     # Retrieval parameters
     sbert_top_k: int = 10
@@ -77,6 +82,7 @@ class ModelConfig:
 class GateConfig:
     """Auto-match gate thresholds (all configurable)."""
     min_score: float = 0.90
+    auto_reject_score: float = 0.30  # P2: scores below this → AUTO_REJECT (no review needed)
     margin: float = 0.10
     kickoff_window_hours: int = 30
     max_kickoff_diff_minutes: int = 60
@@ -120,6 +126,7 @@ class TrainingConfig:
     test_ratio: float = 0.1
 
     early_stopping_patience: int = int(os.getenv("EARLY_STOPPING_PATIENCE", "2"))
+    lr_scheduler_type: str = os.getenv("LR_SCHEDULER_TYPE", "cosine")  # "linear", "cosine", "constant"
 
     max_hard_negatives_per_positive: int = 4
     min_hard_negative_score: float = 0.3
