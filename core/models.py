@@ -103,7 +103,10 @@ class Candidate(BaseModel):
     time_diff_minutes: float
     swapped: bool = False            # True if home/away were swapped to get best score
     category_tags: List[str] = []
-    team_similarity: float = 0.0     # Pre-computed team name similarity (0-1)
+    team_similarity: float = 0.0     # Combined team-pair similarity (0-1)
+    home_team_similarity: float = 0.0  # Per-side: home team similarity (0-1)
+    away_team_similarity: float = 0.0  # Per-side: away team similarity (0-1)
+    min_team_similarity: float = 0.0   # min(home_team_similarity, away_team_similarity)
     league_similarity: float = 0.0   # Pre-computed league name similarity (0-1)
 
 

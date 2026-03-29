@@ -440,6 +440,29 @@ def build_swapped_text(
     return _build_match_text_cached(league, away_team, home_team, tags, include_tags)
 
 
+def build_teams_only_text(
+    home_team: str,
+    away_team: str,
+    category_tags=None,
+    include_tags: bool = True,
+) -> str:
+    """Build text with teams only (no league) for teams-only retrieval.
+    P0 policy: candidate generation should use both league+teams and teams-only."""
+    tags = tuple(category_tags) if category_tags else ()
+    return _build_match_text_cached("", home_team, away_team, tags, include_tags)
+
+
+def build_teams_only_swapped_text(
+    home_team: str,
+    away_team: str,
+    category_tags=None,
+    include_tags: bool = True,
+) -> str:
+    """Build swapped text with teams only (no league)."""
+    tags = tuple(category_tags) if category_tags else ()
+    return _build_match_text_cached("", away_team, home_team, tags, include_tags)
+
+
 # ═══════════════════════════════════════════════
 # Team Name Similarity (heavily cached)
 # ═══════════════════════════════════════════════
@@ -542,12 +565,13 @@ def _combine_pair_scores(sim_a: float, sim_b: float) -> float:
 def compute_team_similarity(
     op_home: str, op_away: str,
     b365_home: str, b365_away: str,
-) -> Tuple[float, bool]:
+) -> Tuple[float, float, float, float, bool]:
     """
     Compute best team-pair similarity between an OP match and a B365 match.
     Tries both normal and swapped orientation.
 
-    Returns (best_similarity 0-1, is_swapped).
+    Returns (combined_score, home_sim, away_sim, min_team_sim, is_swapped).
+    home_sim/away_sim are for the selected (best) direction.
     """
     home_sim = _team_pair_sim(op_home, b365_home)
     away_sim = _team_pair_sim(op_away, b365_away)
@@ -558,8 +582,8 @@ def compute_team_similarity(
     swapped_score = _combine_pair_scores(swap_home_sim, swap_away_sim)
 
     if swapped_score > normal_score:
-        return swapped_score, True
-    return normal_score, False
+        return swapped_score, swap_home_sim, swap_away_sim, min(swap_home_sim, swap_away_sim), True
+    return normal_score, home_sim, away_sim, min(home_sim, away_sim), False
 
 
 @lru_cache(maxsize=8192)

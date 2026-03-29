@@ -29,7 +29,8 @@ from core.models import (
 from core.normalizer import (
     build_match_text, build_swapped_text, detect_categories,
     resolve_alias, clean_text, compute_team_similarity,
-    compute_league_similarity,
+    compute_league_similarity, build_teams_only_text,
+    build_teams_only_swapped_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -297,13 +298,24 @@ class InferenceEngine:
             op_match.league, op_match.home_team, op_match.away_team,
             op_match.category_tags,
         )
+        # P0 policy: teams-only retrieval to avoid missing matches due to noisy league names
+        op_teams_text = build_teams_only_text(
+            op_match.home_team, op_match.away_team, op_match.category_tags,
+        )
+        op_teams_swap_text = build_teams_only_swapped_text(
+            op_match.home_team, op_match.away_team, op_match.category_tags,
+        )
 
-        # Encode both texts in one call
+        # Encode all 4 texts in one call
         embeddings = np.asarray(
-            self.sbert.encode([op_text, op_swap_text], normalize_embeddings=True),
+            self.sbert.encode(
+                [op_text, op_swap_text, op_teams_text, op_teams_swap_text],
+                normalize_embeddings=True,
+            ),
             dtype=np.float32,
         )
         query_emb, swap_emb = embeddings[0], embeddings[1]
+        teams_emb, teams_swap_emb = embeddings[2], embeddings[3]
 
         # Vectorized pre-filter
         filt_indices = self._prefilter(op_match)
@@ -312,13 +324,15 @@ class InferenceEngine:
 
         top_k = CONFIG.model.sbert_top_k
 
-        # SBERT retrieval — normal + swapped, merged
+        # SBERT retrieval — league+teams (normal + swapped) + teams-only (normal + swapped)
         normal_hits = self._sbert_retrieve_from_embedding(query_emb, filt_indices, top_k)
         swap_hits = self._sbert_retrieve_from_embedding(swap_emb, filt_indices, top_k)
+        teams_hits = self._sbert_retrieve_from_embedding(teams_emb, filt_indices, top_k)
+        teams_swap_hits = self._sbert_retrieve_from_embedding(teams_swap_emb, filt_indices, top_k)
 
         seen = set()
         merged_indices = []
-        for idx, _ in normal_hits + swap_hits:
+        for idx, _ in normal_hits + swap_hits + teams_hits + teams_swap_hits:
             if idx not in seen:
                 merged_indices.append(idx)
                 seen.add(idx)
@@ -357,14 +371,23 @@ class InferenceEngine:
         # ── Step 1: Build all texts ──
         normal_texts = []
         swapped_texts = []
+        teams_texts = []
+        teams_swapped_texts = []
         for op in op_matches:
             normal_texts.append(op.build_text())
             swapped_texts.append(build_swapped_text(
                 op.league, op.home_team, op.away_team, op.category_tags,
             ))
+            # P0 policy: teams-only retrieval path
+            teams_texts.append(build_teams_only_text(
+                op.home_team, op.away_team, op.category_tags,
+            ))
+            teams_swapped_texts.append(build_teams_only_swapped_text(
+                op.home_team, op.away_team, op.category_tags,
+            ))
 
         # ── Step 2: Batch encode ALL queries in ONE GPU call ──
-        all_texts = normal_texts + swapped_texts
+        all_texts = normal_texts + swapped_texts + teams_texts + teams_swapped_texts
         use_fp16 = CONFIG.model.use_fp16 and CONFIG.model.device == "cuda"
         logger.info(f"Batch encoding {len(all_texts)} OP texts (fp16={use_fp16})...")
         all_embeddings = np.asarray(
@@ -378,7 +401,9 @@ class InferenceEngine:
         )
 
         normal_embs = all_embeddings[:n]
-        swapped_embs = all_embeddings[n:]
+        swapped_embs = all_embeddings[n:2*n]
+        teams_embs = all_embeddings[2*n:3*n]
+        teams_swapped_embs = all_embeddings[3*n:]
 
         # ── Step 3: Pre-filter + SBERT retrieval per query ──
         # Collect cross-encoder pairs across ALL queries for batched scoring
@@ -393,17 +418,23 @@ class InferenceEngine:
                 query_sbert_candidates.append([])
                 continue
 
-            # SBERT retrieval using pre-computed embeddings
+            # SBERT retrieval: league+teams + teams-only (both normal + swapped)
             normal_hits = self._sbert_retrieve_from_embedding(
                 normal_embs[i], filt_indices, top_k,
             )
             swap_hits = self._sbert_retrieve_from_embedding(
                 swapped_embs[i], filt_indices, top_k,
             )
+            teams_hits = self._sbert_retrieve_from_embedding(
+                teams_embs[i], filt_indices, top_k,
+            )
+            teams_swap_hits = self._sbert_retrieve_from_embedding(
+                teams_swapped_embs[i], filt_indices, top_k,
+            )
 
             seen = set()
             merged = []
-            for idx, _ in normal_hits + swap_hits:
+            for idx, _ in normal_hits + swap_hits + teams_hits + teams_swap_hits:
                 if idx not in seen:
                     merged.append(idx)
                     seen.add(idx)
@@ -495,7 +526,7 @@ class InferenceEngine:
                 (op_match.kickoff - b365.kickoff).total_seconds() / 60.0
             )
 
-            team_sim, sim_swapped = compute_team_similarity(
+            team_sim, home_sim, away_sim, min_tsim_val, sim_swapped = compute_team_similarity(
                 op_match.home_team, op_match.away_team,
                 b365.home_team, b365.away_team,
             )
@@ -505,8 +536,9 @@ class InferenceEngine:
             )
 
             # Hard gates (TOP PRIORITY): team + kickoff → zero on mismatch
+            # P0 policy: gate on min(home_sim, away_sim) — BOTH sides must be strong
             # Soft factor (LOW PRIORITY): league → reduces score, never zeros
-            if team_sim < min_tsim:
+            if min_tsim_val < min_tsim:
                 final_score = 0.0
             elif time_diff > max_kickoff:
                 final_score = 0.0
@@ -515,7 +547,7 @@ class InferenceEngine:
                 league_factor = (1.0 - league_w) + league_w * league_sim
                 final_score = base_score * league_factor
 
-            use_swapped = sim_swapped if team_sim >= min_tsim else is_swapped
+            use_swapped = sim_swapped if min_tsim_val >= min_tsim else is_swapped
 
             candidates.append(Candidate(
                 rank=rank,
@@ -529,6 +561,9 @@ class InferenceEngine:
                 swapped=use_swapped,
                 category_tags=b365.category_tags,
                 team_similarity=round(team_sim, 4),
+                home_team_similarity=round(home_sim, 4),
+                away_team_similarity=round(away_sim, 4),
+                min_team_similarity=round(min_tsim_val, 4),
                 league_similarity=round(league_sim, 4),
             ))
 
@@ -629,17 +664,19 @@ class InferenceEngine:
             details["category_gate"] = False
             details["category_reason"] = "category_mismatch"
 
-        # Kickoff gate: time diff must be within ±45 minutes (hard cutoff)
+        # Kickoff gate: time diff must be within ±60 minutes (hard cutoff, P0 policy)
         details["time_diff_minutes"] = top1.time_diff_minutes
         details["max_kickoff_diff_minutes"] = gates.max_kickoff_diff_minutes
         if top1.time_diff_minutes <= gates.max_kickoff_diff_minutes:
             details["kickoff_gate"] = True
 
-        # Use pre-computed team_similarity from _build_suggestion (avoid recomputation)
-        team_sim = top1.team_similarity
-        details["team_similarity"] = team_sim
+        # P0 policy: gate on min(home_sim, away_sim) — BOTH sides must be strong
+        details["team_similarity"] = top1.team_similarity
+        details["home_team_similarity"] = top1.home_team_similarity
+        details["away_team_similarity"] = top1.away_team_similarity
+        details["min_team_similarity"] = top1.min_team_similarity
         details["min_team_similarity_threshold"] = gates.min_team_similarity
-        if team_sim >= gates.min_team_similarity:
+        if top1.min_team_similarity >= gates.min_team_similarity:
             details["team_name_gate"] = True
 
         # League gate: SOFT — informational only, does NOT block AUTO_MATCH

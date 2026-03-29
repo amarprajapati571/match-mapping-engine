@@ -59,6 +59,9 @@ class CompareResponse(BaseModel):
 
     # Similarity
     team_similarity: float
+    home_team_similarity: float
+    away_team_similarity: float
+    min_team_similarity: float
     league_similarity: float
 
     # Sport
@@ -135,7 +138,7 @@ def compare_matches(provider: MatchInput, bet365: MatchInput, engine) -> Compare
     norm_ce = float(_sigmoid_np(np.array([best_ce_raw]))[0])
 
     # ── Step 5: Team similarity ──
-    team_sim, sim_swapped = compute_team_similarity(
+    team_sim, home_sim, away_sim, min_tsim_val, sim_swapped = compute_team_similarity(
         provider.home_team, provider.away_team,
         bet365.home_team, bet365.away_team,
     )
@@ -159,9 +162,10 @@ def compare_matches(provider: MatchInput, bet365: MatchInput, engine) -> Compare
     max_kickoff = gates_cfg.max_kickoff_diff_minutes
     league_w = gates_cfg.league_soft_weight  # max penalty for league mismatch
 
+    # P0 policy: gate on min(home_sim, away_sim) — BOTH sides must be strong
     if not sport_match:
         final_score = 0.0
-    elif team_sim < min_tsim:
+    elif min_tsim_val < min_tsim:
         final_score = 0.0
     elif time_diff_min > max_kickoff:
         final_score = 0.0
@@ -174,7 +178,7 @@ def compare_matches(provider: MatchInput, bet365: MatchInput, engine) -> Compare
 
     # ── Step 9: Swap detection ──
     ce_says_swapped = swapped_ce > normal_ce
-    is_swapped = sim_swapped if team_sim >= min_tsim else ce_says_swapped
+    is_swapped = sim_swapped if min_tsim_val >= min_tsim else ce_says_swapped
 
     swap_reason = "none"
     if is_swapped:
@@ -233,7 +237,7 @@ def compare_matches(provider: MatchInput, bet365: MatchInput, engine) -> Compare
         description=cat_desc,
     ))
 
-    # 4. kickoff_gate (±45 minutes hard cutoff)
+    # 4. kickoff_gate (±60 minutes hard cutoff, P0 policy)
     kickoff_pass = time_diff_min <= max_kickoff
     gate_results.append(GateDetail(
         name="kickoff_gate",
@@ -243,14 +247,17 @@ def compare_matches(provider: MatchInput, bet365: MatchInput, engine) -> Compare
         description=f"{time_diff_min:.1f}min {'≤' if kickoff_pass else '>'} {max_kickoff}min",
     ))
 
-    # 5. team_name_gate
-    team_pass = team_sim >= gates_cfg.min_team_similarity
+    # 5. team_name_gate — P0 policy: gate on min(home_sim, away_sim)
+    team_pass = min_tsim_val >= gates_cfg.min_team_similarity
     gate_results.append(GateDetail(
         name="team_name_gate",
         passed=team_pass,
-        actual_value=round(team_sim, 4),
+        actual_value=round(min_tsim_val, 4),
         threshold=gates_cfg.min_team_similarity,
-        description=f"Team similarity {team_sim:.4f} {'≥' if team_pass else '<'} {gates_cfg.min_team_similarity}",
+        description=(
+            f"Min team sim {min_tsim_val:.4f} {'≥' if team_pass else '<'} {gates_cfg.min_team_similarity} "
+            f"(home={home_sim:.4f}, away={away_sim:.4f})"
+        ),
     ))
 
     # 6. league_gate (SOFT — informational only, does NOT block verdict)
@@ -292,6 +299,9 @@ def compare_matches(provider: MatchInput, bet365: MatchInput, engine) -> Compare
         normal_ce_score=round(normal_ce, 4),
         swapped_ce_score=round(swapped_ce, 4),
         team_similarity=round(team_sim, 4),
+        home_team_similarity=round(home_sim, 4),
+        away_team_similarity=round(away_sim, 4),
+        min_team_similarity=round(min_tsim_val, 4),
         league_similarity=round(league_sim, 4),
         provider_sport=provider.sport,
         bet365_sport=bet365.sport,

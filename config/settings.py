@@ -79,7 +79,7 @@ class GateConfig:
     min_score: float = 0.90
     margin: float = 0.10
     kickoff_window_hours: int = 30
-    max_kickoff_diff_minutes: int = 45
+    max_kickoff_diff_minutes: int = 60
 
     sensitive_categories: list = field(default_factory=lambda: [
         "WOMEN", "U23", "U21", "U20", "U19", "U18", "U17",
@@ -87,7 +87,7 @@ class GateConfig:
     ])
     block_sensitive_auto_match: bool = True
 
-    min_team_similarity: float = 0.25
+    min_team_similarity: float = 0.55  # P0: gates on min(home_sim, away_sim) — both sides must be strong
     team_sim_weight: float = 0.70
 
     # League is LOW PRIORITY — soft factor, not a hard gate.

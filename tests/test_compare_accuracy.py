@@ -86,9 +86,9 @@ TEST_CASES = [
         # → "Djokovic" vs "Djokovic N." → similarity 0.94 > 0.90 threshold
     },
     {
-        "name": "TP-7: Kickoff exactly at boundary (44 min)",
+        "name": "TP-7: Kickoff exactly at boundary (59 min)",
         "provider": make_match("Liverpool", "Everton", "Premier League", kickoff="2026-02-27T18:00:00"),
-        "bet365": make_match("Liverpool FC", "Everton FC", "Premier League", kickoff="2026-02-27T18:44:00"),
+        "bet365": make_match("Liverpool FC", "Everton FC", "Premier League", kickoff="2026-02-27T18:59:00"),
         "expected": "MATCH",
         "category": "True Positive",
     },
@@ -179,9 +179,9 @@ TEST_CASES = [
         "category": "Time Mismatch",
     },
     {
-        "name": "TN-TIME-3: Just over 45 min (46 min)",
+        "name": "TN-TIME-3: Just over 60 min (61 min)",
         "provider": make_match("Liverpool", "Everton", "Premier League", kickoff="2026-02-27T18:00:00"),
-        "bet365": make_match("Liverpool FC", "Everton FC", "Premier League", kickoff="2026-02-27T18:46:00"),
+        "bet365": make_match("Liverpool FC", "Everton FC", "Premier League", kickoff="2026-02-27T19:01:00"),
         "expected": "NO_MATCH",
         "category": "Time Mismatch",
     },
@@ -234,9 +234,9 @@ TEST_CASES = [
         "category": "Edge Case",
     },
     {
-        "name": "EDGE-3: Kickoff exactly at 45 min boundary",
+        "name": "EDGE-3: Kickoff exactly at 60 min boundary",
         "provider": make_match("Arsenal", "Chelsea", "Premier League", kickoff="2026-02-27T18:00:00"),
-        "bet365": make_match("Arsenal", "Chelsea", "Premier League", kickoff="2026-02-27T18:45:00"),
+        "bet365": make_match("Arsenal", "Chelsea", "Premier League", kickoff="2026-02-27T19:00:00"),
         "expected": "MATCH",
         "category": "Edge Case",
     },
